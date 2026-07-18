@@ -1,54 +1,44 @@
 # VibeResearching ✨
 
-**Turn a topic into cited, multi-depth research — without babysitting the API.** Cursor skills + Valyu DeepResearch runners handle baselines, parallel facets, HITL checkpoints, and OpenAlex citation audits.
+**Turn a topic into cited research reports — baselines, deep dives, and parallel facets — without babysitting the API.**
+
+Cursor skills + Valyu DeepResearch runners handle the boring parts: async polling, retries, cost guardrails, and optional OpenAlex citation audits.
 
 ## Why VibeResearching? 🚀
 
-- **Go Deeper Fast** — Fast baseline, then heavy/max dive or parallel facet batches
-- **Stay In Budget** — Cost guardrails abort before overspend (`--max-cost`)
-- **Recover Gracefully** — Async submit/poll, batch retry, persistent OpenAlex cache
-- **Talk-Ready Craft** — Enrich storytelling/visuals from idea + outline (`enrich-research`)
+- **Go deeper fast** — Fast baseline, then a heavy dive *or* parallel facet batches
+- **Stay in budget** — `--max-cost` aborts before overspend
+- **Recover gracefully** — Async submit/poll, batch retry, persistent OpenAlex cache
+- **Talk-ready craft** — Enrich storytelling and visuals from an idea + outline
 
-## Features
+## Pick a path
 
-- 🧪 **Hierarchical Deep Research** — Fast → one in-scope deep query → heavy/max with optional HITL
-- ⚡ **Parallel Batch Research** — Decompose facets → concurrent Valyu tasks → retry failures
-- 🎨 **Enrich Research** — Fast-mode craft research for talks (`work/research/*`)
-- 📚 **OpenAlex Verify** — Audit `## Sources` into sidecar JSON (never mutates reports)
-- 📄 **PDF → Markdown** — marker-pdf conversion with pdfplumber/pypdf fallback
-- 🚢 **Ship It** — Secret-scan + pytest gate before commit/push
+| You want… | Use | Outputs |
+|-----------|-----|---------|
+| One topic, one deeper dive | `deep-research` | `output/research_init.md` → `output/research_deep.md` |
+| Many facets of one topic, in parallel | `batch-research` | `output/ideas.json` + `output/researchNN_*.md` |
+| Storytelling / visual craft for a talk | `enrich-research` | `work/research/*` |
+| Citation check after any of the above | `verify-references` | `{report}.json` sidecars (reports unchanged) |
+
+In Cursor, invoke the matching skill (`deep-research`, `batch-research`, `enrich-research`, `verify-references`). Or call the runners below directly.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env   # add Valyu (+ optional OpenAlex / MiniMax) keys
+cp .env.example .env   # add your Valyu key (+ optional OpenAlex)
 ```
 
-## Pipeline
+## First run
 
-Pick a path — **deep**, **batch**, or **enrich** — then optionally **verify**:
+A fast baseline is the cheapest way to see the pipeline:
 
 ```bash
-# 1a. Deep: fast baseline → heavy dive
 python .cursor/skills/deep-research/scripts/research_runner.py run \
   --query "YOUR_TOPIC" --output output/research_init.md --mode fast
-
-# 1b. Batch: baseline → ideas.json → parallel facets
-python .cursor/skills/batch-research/scripts/research_runner.py single \
-  --query "YOUR_TOPIC" --output output/research_init.md --mode fast
-python .cursor/skills/batch-research/scripts/research_runner.py batch \
-  --queries-file output/ideas.json --output-dir output --mode fast --no-wait
-
-# 1c. Enrich (talk craft): idea.md + outline_*.md → work/research/
-#    (agent skill; uses the batch runner under the hood)
-
-# 2. Optional: verify citations via OpenAlex
-python .cursor/skills/verify-references/scripts/verify_references.py verify \
-  --input "output/*.md" --max-cost 1.0
 ```
 
-> 💡 Deep/batch artifacts land in `output/`. Enrich writes under `work/research/` (symlink to sibling VibeSliding `work/` is fine). Use Cursor skills `deep-research`, `batch-research`, `enrich-research`, or `verify-references` to drive the full workflow.
+Open `output/research_init.md`. From there: narrow into a heavy dive (`deep-research`), fan out facets (`batch-research`), or enrich a talk (`enrich-research`).
 
 ## Usage Examples
 
@@ -64,28 +54,31 @@ python .cursor/skills/deep-research/scripts/research_runner.py status \
 python .cursor/skills/deep-research/scripts/research_runner.py respond \
   --task-id "TASK_ID" --response-file output/checkpoint_response.json
 
+# Batch: baseline → ideas → parallel facets
+python .cursor/skills/batch-research/scripts/research_runner.py single \
+  --query "YOUR_TOPIC" --output output/research_init.md --mode fast
+python .cursor/skills/batch-research/scripts/research_runner.py batch \
+  --queries-file output/ideas.json --output-dir output --mode fast --no-wait
+
 # Batch: status + retry failed tasks
 python .cursor/skills/batch-research/scripts/research_runner.py status \
   --batch-id "BATCH_ID" --output-dir output
 python .cursor/skills/batch-research/scripts/research_runner.py retry \
   --manifest output/manifest.json --output-dir output --mode fast --max-cost 2.00
 
-# Enrich: craft batch into work/research/
+# Enrich: craft batch into work/research/ (agent skill writes ideas.json first)
 python .cursor/skills/batch-research/scripts/research_runner.py batch \
   --queries-file work/research/ideas.json --output-dir work/research \
   --name "Talk enrich" --mode fast --no-wait --max-cost 2.00
 
-# Verify: re-run unresolved sidecars
+# Verify: audit ## Sources via OpenAlex (never rewrites reports)
+python .cursor/skills/verify-references/scripts/verify_references.py verify \
+  --input "output/*.md" --max-cost 1.0
 python .cursor/skills/verify-references/scripts/verify_references.py retry \
   --input "output/*.md" --force-search
-
-# PDF → Markdown
-python .cursor/skills/convert-pdf-to-markdown/scripts/convert.py \
-  --input path/to/document.pdf --output output/document.md
-
-# Ship gate
-python .cursor/skills/ship-it/scripts/ship_it.py check
 ```
+
+> Deep/batch artifacts land in `output/`. Enrich writes under `work/research/` (a symlink to a sibling project’s `work/` is fine).
 
 ## CLI Reference
 
@@ -144,28 +137,9 @@ python .cursor/skills/ship-it/scripts/ship_it.py check
 | `retry` | `--refs` | Specific `.json` sidecar or glob |
 | `retry` | `--force-search` | Skip singleton lookup; force title search |
 
-### `convert-pdf-to-markdown` (`convert.py`)
-
-| Option | Description |
-|--------|-------------|
-| `--input`, `-i` | Input PDF (required) |
-| `--output`, `-o` | Output `.md` (default: beside input) |
-| `--output-dir`, `-d` | Dir for markdown + images |
-| `--fallback` | Skip marker-pdf; use pdfplumber/pypdf |
-
-### `ship-it` (`ship_it.py`)
-
-| Command | Option | Description |
-|---------|--------|-------------|
-| *(global)* | `--repo-root` | Repository root (default: discover from cwd) |
-| `check` | `--staged` | Scan only staged files |
-| `check` | `pytest_args` | Extra args forwarded to pytest |
-| `test` | `pytest_args` | Extra args forwarded to pytest |
-| `scan` | `--staged` | Scan only staged files |
-
 ## Input/Output
 
-### Output Directory (deep / batch)
+### Output directory (deep / batch)
 
 ```
 output/
@@ -181,7 +155,7 @@ output/
 └── researchNN_*.md               # per-query batch reports
 ```
 
-### Enrich Directory (talk craft)
+### Enrich directory (talk craft)
 
 ```
 work/research/
@@ -194,7 +168,7 @@ work/research/
 └── active_batches.json
 ```
 
-### Ideas Format
+### Ideas format
 
 ```json
 {
@@ -208,7 +182,7 @@ work/research/
 
 Queries may also be `{"query": "..."}` objects (`id` / `track` kept locally; runner sends query strings only).
 
-### Cost Reference
+### Cost reference
 
 | Mode | Approx. cost / task | Suggested `--max-cost` |
 |------|---------------------|------------------------|
@@ -217,7 +191,7 @@ Queries may also be `{"query": "..."}` objects (`id` / `track` kept locally; run
 | `heavy` | ~$2.50 | $5.00 |
 | `max` | ~$15.00 | $20.00 |
 
-Estimate ≈ `num_queries × mode_cost`; runners abort before API call if over `--max-cost`.
+Estimate ≈ `num_queries × mode_cost`; runners abort before the API call if over `--max-cost`.
 
 ## Configuration
 

@@ -1,5 +1,5 @@
 ---
-description: Keep README.md accurate, attractive, and matched to skill runners
+description: Keep README.md accurate, new-user friendly, and matched to research runners
 alwaysApply: true
 ---
 
@@ -7,24 +7,31 @@ alwaysApply: true
 
 Single user-facing doc: `README.md`. No other project `.md` docs.
 
+## Audience & tone
+
+- Write for **first-time users** who want cited research without learning the Valyu API
+- Lead with outcomes and path choice; bury flag tables after a working example
+- Conversational but concrete — short sentences, copy-pasteable commands
+- Do **not** document `ship-it` (internal gate skill; not part of the research product)
+
 ## Style
 
 - Title: `# VibeResearching ✨`
-- Opening: bold tagline + one conversational hook sentence
+- Opening: bold tagline + one hook sentence (what you get, not how it works)
 - Benefits / features: `**Name** — short em-dash explanation`
-- Emoji bullets sparingly (🚀 🧪 ⚡ 🎨 📚 📄 🚢)
+- Emoji sparingly (🚀 🧪 ⚡ 🎨 📚)
 - Closing: friendly one-liner + emojis (e.g. **Happy researching!**)
-- Prefer bullets and bash/INI/JSON blocks over long prose
+- Prefer bullets, small tables, and bash/INI/JSON blocks over long prose
 
 ## Structure (required order)
 
 1. Title + tagline
 2. Why VibeResearching? 🚀
-3. Features
+3. Pick a path — deep / batch / enrich (+ optional verify) as a decision guide
 4. Quick Start (≤3 commands: `pip`, `cp .env.example .env`)
-5. Pipeline — deep / batch / enrich paths + optional verify
-6. Usage Examples — progressive (async deep → batch retry → enrich → verify → convert → ship)
-7. CLI Reference — one subsection per runner below
+5. First run — one concrete happy-path example (prefer deep or batch baseline)
+6. Usage Examples — progressive (async deep → batch retry → enrich → verify)
+7. CLI Reference — one subsection per public runner below
 8. Input/Output — `output/` tree, `work/research/` tree, ideas JSON, cost table
 9. Configuration — `.env` table, priority, categories, sample INI (placeholders only)
 10. License + sign-off
@@ -38,12 +45,11 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 | `deep-research` | `.cursor/skills/deep-research/scripts/research_runner.py` |
 | `batch-research` | `.cursor/skills/batch-research/scripts/research_runner.py` |
 | `verify-references` | `.cursor/skills/verify-references/scripts/verify_references.py` |
-| `convert-pdf-to-markdown` | `.cursor/skills/convert-pdf-to-markdown/scripts/convert.py` |
-| `ship-it` | `.cursor/skills/ship-it/scripts/ship_it.py` |
 
 - Include every command + flag (defaults, required, choices)
-- `enrich-research` is an agent skill (no dedicated runner) — document in Pipeline/Features; CLI examples reuse `batch-research` runner with `work/research/`
+- `enrich-research` is an agent skill (no dedicated runner) — cover in Pick a path / Features; CLI examples reuse `batch-research` with `work/research/`
 - Skill workflow detail lives in `.cursor/skills/*/SKILL.md` — README stays command-oriented
+- Never document `ship-it` or removed skills (e.g. convert-pdf)
 
 ## Canonical paths
 
@@ -68,17 +74,20 @@ Examples must use these paths (`output/...`, `work/research/...`) — never inve
 
 ## Update when
 
-- Any argparse option/default/subcommand changes in skill runners
+- Any argparse option/default/subcommand changes in public research runners
 - `requirements.txt` or `.env.example` changes
-- New/renamed skill, workflow path, or artifact naming
+- New/renamed user-facing skill, workflow path, or artifact naming
 - Mode cost estimates or `--max-cost` defaults change
 - License or project display name changes
 
 ## Do / don't
 
+- ✅ Decision guide before CLI encyclopedia
 - ✅ Bullets, tables, and copy-pasteable commands
 - ✅ Trees that list all generated artifacts
 - ✅ Placeholder secrets only (`your-*-api-key-here`)
+- ❌ Documenting `ship-it` (or any internal-only skill)
+- ❌ Documenting removed skills / runners
 - ❌ New markdown files outside README
 - ❌ Documenting vibesliding `src.*.cli` modules (wrong repo)
 - ❌ Stale flags, paths, or cost numbers after runner edits
