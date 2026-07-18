@@ -1,66 +1,238 @@
-# Valyu DeepResearch Workspace
+# VibeResearching ✨
 
-This workspace provides powerful tools and automation scripts to conduct advanced, multi-step deep research and parallel batch research on any topic, powered by the Valyu DeepResearch API. It contains custom runner scripts and pre-configured Cursor Agent Skills to automate complex research workflows, manage cost guardrails, handle Human-in-the-Loop (HITL) checkpoints, and perform parallel querying with automated error retries.
+**Turn a topic into cited, multi-depth research — without babysitting the API.** Cursor skills + Valyu DeepResearch runners handle baselines, parallel facets, HITL checkpoints, and OpenAlex citation audits.
 
----
+## Why VibeResearching? 🚀
 
-## Directory Structure
+- **Go Deeper Fast** — Fast baseline, then heavy/max dive or parallel facet batches
+- **Stay In Budget** — Cost guardrails abort before overspend (`--max-cost`)
+- **Recover Gracefully** — Async submit/poll, batch retry, persistent OpenAlex cache
+- **Talk-Ready Craft** — Enrich storytelling/visuals from idea + outline (`enrich-research`)
 
-```text
-.
-├── .cursor/
-│   ├── rules/
-│   │   └── env-security.mdc       # Environment security and secrets policies
-│   └── skills/
-│       ├── deep-research/         # Hierarchical Deep Research workflow
-│       │   ├── scripts/
-│       │   │   └── research_runner.py
-│       │   └── SKILL.md
-│       ├── batch-research/        # Parallel Batch Research workflow
-│       │   ├── scripts/
-│       │   │   └── research_runner.py
-│       │   └── SKILL.md
-│       ├── verify-references/     # OpenAlex reference verification
-│       │   ├── scripts/
-│       │   │   └── verify_references.py
-│       │   └── SKILL.md
-│       └── ship-it/               # Test, secret-scan, commit, and push
-│           ├── scripts/
-│           │   └── ship_it.py
-│           └── SKILL.md
-├── tests/                         # Pytest suite (ship-it gate and helpers)
-├── output/                        # Output directory for reports and state tracking
-│   ├── active_tasks.json          # Tracks submitted single async tasks
-│   ├── active_batches.json        # Tracks submitted async batches
-│   ├── manifest.json              # Record of completed/failed tasks in a batch
-│   ├── openalex_cache.json        # Persistent OpenAlex lookup cache (gitignored)
-│   └── *.md                       # Generated research reports
-├── .env.example                   # Configuration template for API keys and options
-├── requirements.txt               # Workspace python dependencies
-└── README.md                      # This file
-```
+## Features
 
----
+- 🧪 **Hierarchical Deep Research** — Fast → one in-scope deep query → heavy/max with optional HITL
+- ⚡ **Parallel Batch Research** — Decompose facets → concurrent Valyu tasks → retry failures
+- 🎨 **Enrich Research** — Fast-mode craft research for talks (`work/research/*`)
+- 📚 **OpenAlex Verify** — Audit `## Sources` into sidecar JSON (never mutates reports)
+- 📄 **PDF → Markdown** — marker-pdf conversion with pdfplumber/pypdf fallback
+- 🚢 **Ship It** — Secret-scan + pytest gate before commit/push
 
-## Prerequisites & Installation
-
-### 1. Install Dependencies
-
-Ensure Python 3.10+ is installed, then install the required Python packages:
+## Quick Start
 
 ```bash
 pip install -r requirements.txt
+cp .env.example .env   # add Valyu (+ optional OpenAlex / MiniMax) keys
 ```
 
-### 2. Configure Environment Variables
+## Pipeline
 
-Copy `.env.example` to `.env`:
+Pick a path — **deep**, **batch**, or **enrich** — then optionally **verify**:
 
 ```bash
-cp .env.example .env
+# 1a. Deep: fast baseline → heavy dive
+python .cursor/skills/deep-research/scripts/research_runner.py run \
+  --query "YOUR_TOPIC" --output output/research_init.md --mode fast
+
+# 1b. Batch: baseline → ideas.json → parallel facets
+python .cursor/skills/batch-research/scripts/research_runner.py single \
+  --query "YOUR_TOPIC" --output output/research_init.md --mode fast
+python .cursor/skills/batch-research/scripts/research_runner.py batch \
+  --queries-file output/ideas.json --output-dir output --mode fast --no-wait
+
+# 1c. Enrich (talk craft): idea.md + outline_*.md → work/research/
+#    (agent skill; uses the batch runner under the hood)
+
+# 2. Optional: verify citations via OpenAlex
+python .cursor/skills/verify-references/scripts/verify_references.py verify \
+  --input "output/*.md" --max-cost 1.0
 ```
 
-Open `.env` and fill in your credentials. The workspace uses both standard environment variables and a custom `[valyu]` INI section.
+> 💡 Deep/batch artifacts land in `output/`. Enrich writes under `work/research/` (symlink to sibling VibeSliding `work/` is fine). Use Cursor skills `deep-research`, `batch-research`, `enrich-research`, or `verify-references` to drive the full workflow.
+
+## Usage Examples
+
+```bash
+# Deep: async heavy dive + poll
+python .cursor/skills/deep-research/scripts/research_runner.py run \
+  --query "NARROWED_QUERY" --output output/research_deep.md \
+  --mode heavy --no-wait --max-cost 5.00
+python .cursor/skills/deep-research/scripts/research_runner.py status \
+  --task-id "TASK_ID" --output output/research_deep.md
+
+# Deep: HITL checkpoint reply
+python .cursor/skills/deep-research/scripts/research_runner.py respond \
+  --task-id "TASK_ID" --response-file output/checkpoint_response.json
+
+# Batch: status + retry failed tasks
+python .cursor/skills/batch-research/scripts/research_runner.py status \
+  --batch-id "BATCH_ID" --output-dir output
+python .cursor/skills/batch-research/scripts/research_runner.py retry \
+  --manifest output/manifest.json --output-dir output --mode fast --max-cost 2.00
+
+# Enrich: craft batch into work/research/
+python .cursor/skills/batch-research/scripts/research_runner.py batch \
+  --queries-file work/research/ideas.json --output-dir work/research \
+  --name "Talk enrich" --mode fast --no-wait --max-cost 2.00
+
+# Verify: re-run unresolved sidecars
+python .cursor/skills/verify-references/scripts/verify_references.py retry \
+  --input "output/*.md" --force-search
+
+# PDF → Markdown
+python .cursor/skills/convert-pdf-to-markdown/scripts/convert.py \
+  --input path/to/document.pdf --output output/document.md
+
+# Ship gate
+python .cursor/skills/ship-it/scripts/ship_it.py check
+```
+
+## CLI Reference
+
+### `deep-research` (`research_runner.py`)
+
+| Command | Option | Description |
+|---------|--------|-------------|
+| `run` | `--query` | Research query (required) |
+| `run` | `--output` | Markdown report path (required) |
+| `run` | `--mode` | `fast` / `standard` / `heavy` / `max` (default: `fast`) |
+| `run` | `--no-wait` | Submit and exit; state in `output/active_tasks.json` |
+| `run` | `--max-cost` | Abort if estimate exceeds USD (default: `3.0`) |
+| `run` | `--hitl` | Enable `plan_review` / `source_review` checkpoints |
+| `status` | `--task-id` | Task ID to poll (required) |
+| `status` | `--output` | Path to save report if completed |
+| `respond` | `--task-id` | Task ID awaiting input (required) |
+| `respond` | `--response-file` | JSON checkpoint response (required) |
+
+### `batch-research` (`research_runner.py`)
+
+| Command | Option | Description |
+|---------|--------|-------------|
+| `single` | `--query` | Research query (required) |
+| `single` | `--output` | Markdown report path (required) |
+| `single` | `--mode` | `fast` / `standard` / `heavy` / `max` (default: `fast`) |
+| `single` | `--no-wait` | Submit and exit without polling |
+| `single` | `--max-cost` | Max allowed cost in USD (default: `3.0`) |
+| `batch` | `--queries-file` | JSON with `queries` list (required) |
+| `batch` | `--output-dir` | Reports + `manifest.json` directory (required) |
+| `batch` | `--name` | Batch name (default: `Batch Research Task`) |
+| `batch` | `--mode` | `fast` / `standard` / `heavy` / `max` (default: `fast`) |
+| `batch` | `--no-wait` | Submit and exit without polling |
+| `batch` | `--max-cost` | Max allowed cost in USD (default: `3.0`) |
+| `status` | `--batch-id` | Batch ID to check (required) |
+| `status` | `--output-dir` | Directory to save results if completed |
+| `retry` | `--manifest` | Prior `manifest.json` (required) |
+| `retry` | `--output-dir` | Directory for retried reports (required) |
+| `retry` | `--mode` | Mode for retried tasks (default: `fast`) |
+| `retry` | `--no-wait` | Submit retry and exit without polling |
+| `retry` | `--max-cost` | Max allowed cost in USD (default: `3.0`) |
+
+### `verify-references` (`verify_references.py`)
+
+| Command | Option | Description |
+|---------|--------|-------------|
+| `verify` / `retry` | `--input` | Glob or file (default: `output/*.md`) |
+| `verify` / `retry` | `--rate` | Max OpenAlex requests/sec (default: `5`) |
+| `verify` / `retry` | `--sim-threshold` | Title similarity threshold (default: `0.8`) |
+| `verify` / `retry` | `--max-cost` | Abort if estimated OpenAlex cost exceeds USD |
+| `verify` / `retry` | `--retries` | Per-request retries (default: `4`) |
+| `verify` / `retry` | `--backoff-base` | Retry backoff base seconds (default: `1.0`) |
+| `verify` / `retry` | `--backoff-cap` | Retry backoff cap seconds (default: `30`) |
+| `verify` / `retry` | `--cache` | Cache path (default: `output/openalex_cache.json`) |
+| `verify` / `retry` | `--no-cache` | Disable persistent cache |
+| `verify` / `retry` | `--refresh-cache` | Ignore cache and refresh entries |
+| `retry` | `--refs` | Specific `.json` sidecar or glob |
+| `retry` | `--force-search` | Skip singleton lookup; force title search |
+
+### `convert-pdf-to-markdown` (`convert.py`)
+
+| Option | Description |
+|--------|-------------|
+| `--input`, `-i` | Input PDF (required) |
+| `--output`, `-o` | Output `.md` (default: beside input) |
+| `--output-dir`, `-d` | Dir for markdown + images |
+| `--fallback` | Skip marker-pdf; use pdfplumber/pypdf |
+
+### `ship-it` (`ship_it.py`)
+
+| Command | Option | Description |
+|---------|--------|-------------|
+| *(global)* | `--repo-root` | Repository root (default: discover from cwd) |
+| `check` | `--staged` | Scan only staged files |
+| `check` | `pytest_args` | Extra args forwarded to pytest |
+| `test` | `pytest_args` | Extra args forwarded to pytest |
+| `scan` | `--staged` | Scan only staged files |
+
+## Input/Output
+
+### Output Directory (deep / batch)
+
+```
+output/
+├── research_init.md              # fast baseline report
+├── research_deep.md              # heavy/max deep-dive report
+├── deep_research_idea.md         # deep-research ideation note
+├── ideas.json                    # batch query list
+├── manifest.json                 # batch task outcomes
+├── active_tasks.json             # async single-task state
+├── active_batches.json           # async batch state
+├── openalex_cache.json           # OpenAlex lookup cache (gitignored)
+├── research_init.json            # verify-references sidecar (audit only)
+└── researchNN_*.md               # per-query batch reports
+```
+
+### Enrich Directory (talk craft)
+
+```
+work/research/
+├── brief.md                      # design note + content_page_count
+├── ideas.json                    # batch payload (S/V/X tracks)
+├── batch_state.json              # ids, tracks, poll command
+├── 00_research_init.md           # optional baseline
+├── researchNN_*.md               # batch reports
+├── manifest.json
+└── active_batches.json
+```
+
+### Ideas Format
+
+```json
+{
+  "main_topic": "Must match the baseline topic",
+  "queries": [
+    "Deeper drill-down into baseline facet 1",
+    "Deeper drill-down into baseline facet 2"
+  ]
+}
+```
+
+Queries may also be `{"query": "..."}` objects (`id` / `track` kept locally; runner sends query strings only).
+
+### Cost Reference
+
+| Mode | Approx. cost / task | Suggested `--max-cost` |
+|------|---------------------|------------------------|
+| `fast` | ~$0.10 | $1.00 |
+| `standard` | ~$0.50 | $2.00 |
+| `heavy` | ~$2.50 | $5.00 |
+| `max` | ~$15.00 | $20.00 |
+
+Estimate ≈ `num_queries × mode_cost`; runners abort before API call if over `--max-cost`.
+
+## Configuration
+
+Copy `.env.example` → `.env`. Priority: CLI flags > env vars > INI sections.
+
+| Section | Used by | Key settings |
+|---------|---------|--------------|
+| *(preamble)* | External tools | `MINIMAX_API_KEY` |
+| `[valyu]` | Deep / batch / enrich runners | `api_key`, `categories` |
+| `[openalex]` | verify-references | `api_key` |
+
+- **Valyu** — `VALYU_API_KEY` overrides `[valyu] api_key`
+- **OpenAlex** — `OPENALEX_API_KEY` overrides `[openalex] api_key` ([free key](https://openalex.org/settings/api))
+- **Categories** — `research`, `healthcare`, `patents`, `markets`, `company`, `economic`, `predictions`, `legal`, `politics`, `cybersecurity`, `transportation` (omit to search all; prefer unset/all for enrich/talk craft)
+- **Never commit `.env`** — only `.env.example` with placeholders
 
 ```ini
 MINIMAX_API_KEY=your-minimax-api-key-here
@@ -73,228 +245,10 @@ categories = research
 api_key = your-openalex-api-key-here
 ```
 
-- **Priority order**: Command-line arguments > Environment variables (`VALYU_API_KEY`, `OPENALEX_API_KEY`) > INI sections inside `.env`.
-- **Allowed Datasource Categories**: `research`, `healthcare`, `patents`, `markets`, `company`, `economic`, `predictions`, `legal`, `politics`, `cybersecurity`, `transportation`. Omit or comment out `categories` to search all sources.
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-## Workflow 1: Hierarchical Deep Research
-
-The **Hierarchical Deep Research** skill (`deep-research`) conducts deep-dive, multi-phase research. Instead of running a single long query, it establishes a baseline, allows for focused sub-topic ideation, and executes high-fidelity deep-dive research with human guidance if needed.
-
-### 4-Phase Process
-
-1. **Phase 1: Fast Mode Baseline**: Run initial research in `fast` mode to establish a broad overview of the topic.
-2. **Phase 2: Analysis & Deep Ideation**: Analyze the baseline report to uncover gaps, structural limitations, or high-potential sub-topics. Formulate a highly specific, deep-dive query and save it to `output/deep_research_idea.md`.
-3. **Phase 3: Heavy Mode Deep Research**: Submit the detailed query in `heavy` or `max` mode. For long-running tasks, run asynchronously (`--no-wait`) to avoid blocking.
-4. **Phase 4: Synthesis & Mode Comparison**: Compare both generated reports and present a comprehensive comparative synthesis (findings, sources, and a cost-benefit analysis).
-
-### Commands & Subcommands
-
-The deep research runner is located at `.cursor/skills/deep-research/scripts/research_runner.py`.
-
-#### `run`
-Submit a research task.
-
-```bash
-python .cursor/skills/deep-research/scripts/research_runner.py run \
-  --query "YOUR_RESEARCH_QUERY" \
-  --output "output/research_init.md" \
-  --mode "fast" \
-  --max-cost 3.00
-```
-
-**Key Flags for `run`**:
-- `--query`: The research query string (required).
-- `--output`: Filepath to write the completed markdown report (required).
-- `--mode`: Valyu research depth. Choices: `fast`, `standard`, `heavy`, `max`.
-- `--no-wait`: Submits the task and exits immediately (recommended for `heavy` and `max` modes). Saves state to `output/active_tasks.json`.
-- `--max-cost`: Aborts task submission if estimated cost exceeds this limit in USD.
-- `--hitl`: Enables Human-in-the-Loop checkpoints (`plan_review` and `source_review`).
-
-#### `status`
-Check the status of an asynchronously submitted task and download results upon completion.
-
-```bash
-python .cursor/skills/deep-research/scripts/research_runner.py status \
-  --task-id "YOUR_TASK_ID" \
-  --output "output/research_deep.md"
-```
-
-#### `respond`
-Reply to a Human-in-the-Loop checkpoint when a task is paused in the `awaiting_input` state.
-
-```bash
-python .cursor/skills/deep-research/scripts/research_runner.py respond \
-  --task-id "YOUR_TASK_ID" \
-  --response-file "output/checkpoint_response.json"
-```
-
----
-
-## Workflow 2: Parallel Batch Research
-
-The **Batch Research** skill (`batch-research`) runs multiple deep research tasks concurrently. It is highly optimized for exploring several distinct facets or sub-ideas of a main subject simultaneously.
-
-### 4-Phase Process
-
-1. **Phase 1: Initial Research**: Perform single research on the main topic in `fast` mode.
-2. **Phase 2: Analysis & Ideation**: Brainstorm up to 12 distinct, high-quality queries expanding on initial findings and save them in a structured JSON file at `output/ideas.json`.
-3. **Phase 3: Batch Research Execution**: Submit the queries file to execute the parallel research tasks.
-4. **Phase 4: Verification, Retry & Synthesis**: Inspect progress. If any concurrent task fails, run the automated `retry` command to re-submit only the failed queries. Present a clean synthesis table showing filepaths and major findings.
-
-### Commands & Subcommands
-
-The batch research runner is located at `.cursor/skills/batch-research/scripts/research_runner.py`.
-
-#### `single`
-Runs a single, synchronous deep research task (similar to deep research `run` without HITL support).
-
-```bash
-python .cursor/skills/batch-research/scripts/research_runner.py single \
-  --query "YOUR_QUERY" \
-  --output "output/research_init.md" \
-  --mode "fast"
-```
-
-#### `batch`
-Submit a batch of queries to run concurrently.
-
-```bash
-python .cursor/skills/batch-research/scripts/research_runner.py batch \
-  --queries-file "output/ideas.json" \
-  --output-dir "output" \
-  --name "My Batch Name" \
-  --mode "fast" \
-  --max-cost 5.00
-```
-
-**Input File Format (`output/ideas.json`)**:
-```json
-{
-  "queries": [
-    "Query 1 text...",
-    "Query 2 text..."
-  ]
-}
-```
-
-#### `status`
-Check the progress of a batch of research tasks and download completed reports.
-
-```bash
-python .cursor/skills/batch-research/scripts/research_runner.py status \
-  --batch-id "YOUR_BATCH_ID" \
-  --output-dir "output"
-```
-
-#### `retry`
-Identify failed or cancelled tasks in a completed batch from its `manifest.json`, re-submit them as a new batch, and merge the final results back into the original manifest.
-
-```bash
-python .cursor/skills/batch-research/scripts/research_runner.py retry \
-  --manifest "output/manifest.json" \
-  --output-dir "output" \
-  --mode "fast" \
-  --max-cost 2.00
-```
-
----
-
-## Workflow 3: Reference Verification & Enrichment
-
-The **Verify References** skill (`verify-references`) checks citations in research reports against OpenAlex and writes audit-only sidecar JSON files. It defaults to `output/*.md` and never modifies the source reports.
-
-### Process
-
-1. **Verify**: Parse each report's `## Sources` block, resolve references via OpenAlex (DOI/PMID/PMCID singleton lookups first, title search fallback), deduplicate across files, and write `{file}.json` (e.g. `research_init.md` → `research_init.json`).
-2. **Retry (optional)**: Re-run only unverified or errored records and merge results back into the sidecar files.
-
-### Commands
-
-The verify runner is located at `.cursor/skills/verify-references/scripts/verify_references.py`.
-
-#### `verify`
-
-```bash
-python .cursor/skills/verify-references/scripts/verify_references.py verify \
-  --max-cost 1.0
-```
-
-**Key flags**: `--input` (default `output/*.md`), `--rate 5`, `--sim-threshold 0.8`, `--max-cost`, `--no-cache`, `--refresh-cache`.
-
-#### `retry`
-
-```bash
-python .cursor/skills/verify-references/scripts/verify_references.py retry
-```
-
-Re-processes only failed/unverified records from existing `{file}.json` sidecars. Use `--force-search` to skip singleton lookup and force title search.
-
-### OpenAlex notes
-
-- Free API key at [openalex.org/settings/api](https://openalex.org/settings/api) — configure under `[openalex] api_key` in `.env`.
-- Singleton lookups (DOI, PMID, PMCID) are free; title filter calls cost ~$0.0001 each.
-- Persistent cache at `output/openalex_cache.json` avoids redundant lookups across runs.
-
----
-
-## Workflow 4: Ship It (Test, Commit, Push)
-
-The **Ship It** skill (`ship-it`) gates releases: secret-scan changed files, run the pytest suite, then commit and push only if the gate passes.
-
-### Commands
-
-The ship-it runner is located at `.cursor/skills/ship-it/scripts/ship_it.py`.
-
-#### `check` (recommended gate)
-
-```bash
-python .cursor/skills/ship-it/scripts/ship_it.py check
-```
-
-Runs a secret scan on changed files, then `python -m pytest -q`. Abort commit/push if either step fails.
-
-#### `test` / `scan`
-
-```bash
-python .cursor/skills/ship-it/scripts/ship_it.py test
-python .cursor/skills/ship-it/scripts/ship_it.py scan --staged
-```
-
-Or run the suite directly:
-
-```bash
-pytest -q
-```
-
----
-
-## Cost Guidelines & Safety
-
-To prevent unexpected API overspend, both runner scripts enforce cost check guardrails. They calculate expected cost as `num_queries × mode_cost_per_task` and abort before invoking the API if the estimate exceeds `--max-cost` (default is $3.00 if not specified).
-
-### Estimation Reference
-
-| Mode | Approximate Cost per Task | Recommended `--max-cost` |
-|---|---|---|
-| `fast` | $0.10 | $1.00 |
-| `standard` | $0.50 | $2.00 |
-| `heavy` | $2.50 | $5.00 |
-| `max` | $15.00 | $20.00 |
-
-### Examples for Batches
-- 10 parallel queries in `fast` mode ($1.00 estimated): set `--max-cost 2.00`
-- 10 parallel queries in `standard` mode ($5.00 estimated): set `--max-cost 7.00`
-- 12 parallel queries in `heavy` mode ($30.00 estimated): set `--max-cost 35.00`
-
----
-
-## Environment & Secrets Security Policy
-
-To maintain confidentiality of API credentials and keys:
-
-1. **Do Not Commit `.env`**: The `.env` file containing real keys must never be staged, committed, or pushed. It is listed in `.gitignore` to prevent accidental inclusion.
-2. **Template Placeholder Usage**: Only `.env.example` containing placeholder values should be committed to track configuration requirements.
-3. **No Hardcoding**: API keys and proxy credentials must never be hardcoded in Python scripts, tests, markdown files, or code comments.
-4. **Key Redaction**: If keys need to be logged or printed during debugging, they should be redacted (e.g., `val_...last4` or `sk-...last4`).
+**Happy researching! 🧪✨** Fast baselines, deep dives, and citation-ready reports — without the API grind.

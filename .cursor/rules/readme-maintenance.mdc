@@ -1,0 +1,84 @@
+---
+description: Keep README.md accurate, attractive, and matched to skill runners
+alwaysApply: true
+---
+
+# README Maintenance
+
+Single user-facing doc: `README.md`. No other project `.md` docs.
+
+## Style
+
+- Title: `# VibeResearching ✨`
+- Opening: bold tagline + one conversational hook sentence
+- Benefits / features: `**Name** — short em-dash explanation`
+- Emoji bullets sparingly (🚀 🧪 ⚡ 🎨 📚 📄 🚢)
+- Closing: friendly one-liner + emojis (e.g. **Happy researching!**)
+- Prefer bullets and bash/INI/JSON blocks over long prose
+
+## Structure (required order)
+
+1. Title + tagline
+2. Why VibeResearching? 🚀
+3. Features
+4. Quick Start (≤3 commands: `pip`, `cp .env.example .env`)
+5. Pipeline — deep / batch / enrich paths + optional verify
+6. Usage Examples — progressive (async deep → batch retry → enrich → verify → convert → ship)
+7. CLI Reference — one subsection per runner below
+8. Input/Output — `output/` tree, `work/research/` tree, ideas JSON, cost table
+9. Configuration — `.env` table, priority, categories, sample INI (placeholders only)
+10. License + sign-off
+
+## CLI Reference sources of truth
+
+Document argparse exactly — run `--help` or read `add_argument` in:
+
+| README section | Script |
+|----------------|--------|
+| `deep-research` | `.cursor/skills/deep-research/scripts/research_runner.py` |
+| `batch-research` | `.cursor/skills/batch-research/scripts/research_runner.py` |
+| `verify-references` | `.cursor/skills/verify-references/scripts/verify_references.py` |
+| `convert-pdf-to-markdown` | `.cursor/skills/convert-pdf-to-markdown/scripts/convert.py` |
+| `ship-it` | `.cursor/skills/ship-it/scripts/ship_it.py` |
+
+- Include every command + flag (defaults, required, choices)
+- `enrich-research` is an agent skill (no dedicated runner) — document in Pipeline/Features; CLI examples reuse `batch-research` runner with `work/research/`
+- Skill workflow detail lives in `.cursor/skills/*/SKILL.md` — README stays command-oriented
+
+## Canonical paths
+
+| Artifact | Path |
+|----------|------|
+| Deep/batch reports | `output/research_init.md`, `output/research_deep.md`, `output/researchNN_*.md` |
+| Deep ideation | `output/deep_research_idea.md` |
+| Batch queries | `output/ideas.json` |
+| Batch / async state | `output/manifest.json`, `output/active_tasks.json`, `output/active_batches.json` |
+| OpenAlex cache | `output/openalex_cache.json` |
+| Verify sidecars | `{report}.json` beside `{report}.md` (audit-only; never rewrite reports) |
+| Enrich I/O | inputs `work/idea.md`, `work/outline_*.md` → `work/research/` (`brief.md`, `ideas.json`, `batch_state.json`, reports) |
+
+Examples must use these paths (`output/...`, `work/research/...`) — never invent alternate names.
+
+## Configuration rules
+
+- Source of truth: `.env.example` (never paste real keys)
+- Document priority: CLI flags > `VALYU_API_KEY` / `OPENALEX_API_KEY` > `[valyu]` / `[openalex]` INI
+- Categories list must match `.env.example` comments
+- Note: enrich/talk craft prefers unset/all sources over `categories = research`
+
+## Update when
+
+- Any argparse option/default/subcommand changes in skill runners
+- `requirements.txt` or `.env.example` changes
+- New/renamed skill, workflow path, or artifact naming
+- Mode cost estimates or `--max-cost` defaults change
+- License or project display name changes
+
+## Do / don't
+
+- ✅ Bullets, tables, and copy-pasteable commands
+- ✅ Trees that list all generated artifacts
+- ✅ Placeholder secrets only (`your-*-api-key-here`)
+- ❌ New markdown files outside README
+- ❌ Documenting vibesliding `src.*.cli` modules (wrong repo)
+- ❌ Stale flags, paths, or cost numbers after runner edits
