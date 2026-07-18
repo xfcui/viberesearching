@@ -1,0 +1,106 @@
+---
+description: Valyu API DeepResearch best practices and cost safety guardrails
+globs: **/*.{py,md}
+alwaysApply: false
+---
+
+# Valyu API Best Practices
+
+This rule enforces best practices for integrating and working with the Valyu DeepResearch API, ensuring security, cost safety, robust execution, and proper Human-in-the-Loop (HITL) handling.
+
+## 1. API Key Security & Configuration
+
+**Never** hardcode the Valyu API key. Load it dynamically with the following priority order:
+
+1. Environment variable: `VALYU_API_KEY`
+2. `.env` file `[valyu]` INI section: `api_key`
+
+### API Key Loading Example
+
+```python
+# ❌ BAD: Hardcoding the API key or ad-hoc reading of .env
+client = Valyu(api_key="val_9491f67be7e56c44aa78912c...")
+
+# ✅ GOOD: Loading securely using python-dotenv and configparser
+import os
+import configparser
+from pathlib import Path
+from dotenv import load_dotenv
+from valyu import Valyu
+
+def get_valyu_client() -> Valyu:
+    env_path = Path.cwd() / ".env"
+    load_dotenv(env_path)
+    
+    # Try environment variable first
+    api_key = os.getenv("VALYU_API_KEY")
+    
+    # Fallback to [valyu] section in .env
+    if not api_key and env_path.exists():
+        try:
+            text = env_path.read_text(encoding="utf-8")
+            start = text.find("[valyu]")
+            if start != -1:
+                parser = configparser.ConfigParser()
+                parser.read_string(text[start:])
+                api_key = parser.get("valyu", "api_key", fallback="").strip()
+        except Exception:
+            pass
+            
+    if not api_key:
+        raise ValueError("VALYU_API_KEY not found in environment or .env file.")
+    return Valyu(api_key=api_key)
+```
+
+---
+
+## 2. Cost Safety Guardrails
+
+Every task or batch submission must perform a cost check before calling the API. Abort execution if the estimated cost exceeds the safety limit (`--max-cost`, defaulting to `$3.00`).
+
+### Mode Costs
+
+- `fast`: $0.10 per task
+- `standard`: $0.50 per task
+- `heavy`: $2.50 per task
+- `max`: $15.00 per task
+
+### Cost Check Example
+
+```python
+# ❌ BAD: Submitting tasks without cost estimation or guardrails
+task = client.deepresearch.create(query=query, mode="heavy")
+
+# ✅ GOOD: Estimating and validating cost before submission
+MODE_COSTS = {"fast": 0.10, "standard": 0.50, "heavy": 2.50, "max": 15.00}
+
+def check_cost_limit(mode: str, max_cost: float, task_count: int = 1):
+    estimated = MODE_COSTS.get(mode, 0.50) * task_count
+    if estimated > max_cost:
+        sys.exit(f"Error: Estimated cost ${estimated:.2f} exceeds limit of ${max_cost:.2f}. Aborting.")
+```
+
+---
+
+## 3. Asynchronous Execution for Long Tasks
+
+For tasks that take 10+ minutes (`heavy` or `max` modes, or batches with 5+ queries), use **asynchronous execution** (`--no-wait`) to prevent blocking the agent or client thread.
+
+- Save task/batch metadata to state files (e.g., `output/active_tasks.json` or `output/active_batches.json`).
+- Provide a `status` command or polling mechanism to check progress and download results later.
+
+---
+
+## 4. Human-in-the-Loop (HITL) Checkpoints
+
+For high-stakes research, enable HITL checkpoints (`plan_review`, `source_review`).
+
+- Write checkpoint data to `output/checkpoint.json`.
+- Wait for a user response in `output/checkpoint_response.json`.
+- Return the response to the SDK's `on_interaction` callback.
+
+---
+
+## 5. Batch & Retry Workflows
+
+For multi-query research, run tasks in parallel using the batch API. Maintain a `manifest.json` to track task statuses (`completed`, `failed`, `cancelled`), and implement a retry mechanism to re-run only failed tasks.
