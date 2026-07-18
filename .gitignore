@@ -1,9 +1,34 @@
+# Secrets — keep .env.example tracked
 .env
+.env.local
+.env.*.local
+
+# Local workspace artifacts (reports, state, project notes)
 project/
 research/
 output/
+# `work` (no slash) covers the symlink; `work/` covers a real directory
 work
 work/
+
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*~
