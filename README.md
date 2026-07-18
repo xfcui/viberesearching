@@ -20,10 +20,15 @@ This workspace provides powerful tools and automation scripts to conduct advance
 │       │   ├── scripts/
 │       │   │   └── research_runner.py
 │       │   └── SKILL.md
-│       └── verify-references/     # OpenAlex reference verification
+│       ├── verify-references/     # OpenAlex reference verification
+│       │   ├── scripts/
+│       │   │   └── verify_references.py
+│       │   └── SKILL.md
+│       └── ship-it/               # Test, secret-scan, commit, and push
 │           ├── scripts/
-│           │   └── verify_references.py
+│           │   └── ship_it.py
 │           └── SKILL.md
+├── tests/                         # Pytest suite (ship-it gate and helpers)
 ├── output/                        # Output directory for reports and state tracking
 │   ├── active_tasks.json          # Tracks submitted single async tasks
 │   ├── active_batches.json        # Tracks submitted async batches
@@ -231,6 +236,37 @@ Re-processes only failed/unverified records from existing `{file}.json` sidecars
 - Free API key at [openalex.org/settings/api](https://openalex.org/settings/api) — configure under `[openalex] api_key` in `.env`.
 - Singleton lookups (DOI, PMID, PMCID) are free; title filter calls cost ~$0.0001 each.
 - Persistent cache at `output/openalex_cache.json` avoids redundant lookups across runs.
+
+---
+
+## Workflow 4: Ship It (Test, Commit, Push)
+
+The **Ship It** skill (`ship-it`) gates releases: secret-scan changed files, run the pytest suite, then commit and push only if the gate passes.
+
+### Commands
+
+The ship-it runner is located at `.cursor/skills/ship-it/scripts/ship_it.py`.
+
+#### `check` (recommended gate)
+
+```bash
+python .cursor/skills/ship-it/scripts/ship_it.py check
+```
+
+Runs a secret scan on changed files, then `python -m pytest -q`. Abort commit/push if either step fails.
+
+#### `test` / `scan`
+
+```bash
+python .cursor/skills/ship-it/scripts/ship_it.py test
+python .cursor/skills/ship-it/scripts/ship_it.py scan --staged
+```
+
+Or run the suite directly:
+
+```bash
+pytest -q
+```
 
 ---
 
