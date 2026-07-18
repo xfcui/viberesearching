@@ -9,7 +9,7 @@ description: >-
 
 # Verify References
 
-Resolve citations in research reports against OpenAlex. Reads `## Sources` from markdown (default `output/*.md`), writes audit-only `{file}.json` sidecars. **Never modifies reports.**
+Resolve citations in research reports against OpenAlex. Reads `## Sources` from markdown (default `output/*.md`), writes audit-only `{file}.json` sidecars. **Never modifies reports.** Works best when Valyu reports include a `## Sources` block; batch `manifest.json` source lists are not the verify input format.
 
 **Runner:** `.cursor/skills/verify-references/scripts/verify_references.py`
 

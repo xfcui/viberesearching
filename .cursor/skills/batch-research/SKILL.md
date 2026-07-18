@@ -12,7 +12,7 @@ description: >-
 
 Decompose one topic into deeper facets, then run parallel Valyu DeepResearch.
 
-**Not this skill:** talk storytelling/visuals → `enrich-research`. One hierarchical heavy dive → `deep-research`. Citation audit → `verify-references`.
+**Not this skill:** talk storytelling/visuals → `enrich-research`. One hierarchical heavy dive → `deep-research`. Citation audit → `verify-references`. Quick cited lookup → Answer/Search via `.agents/skills/valyu-best-practices`.
 
 **Runner:** `.cursor/skills/batch-research/scripts/research_runner.py`
 
@@ -23,7 +23,9 @@ Decompose one topic into deeper facets, then run parallel Valyu DeepResearch.
 | `status` | Poll + download results |
 | `retry` | Re-run failed/cancelled from `manifest.json` |
 
-Modes: `fast` ~$0.10 · `standard` ~$0.50 · `heavy` ~$2.50 · `max` ~$15. Default `--max-cost` $3.00.
+Modes: `fast` ~$0.10 (~5 min) · `standard` ~$0.50 (~10–20 min) · `heavy` ~$2.50 (~90 min) · `max` ~$15. Default `--max-cost` $3.00.
+
+No HITL on this path—use `deep-research` for plan/source review. Shared Valyu rules: `.cursor/rules/valyu-api.mdc`.
 
 ---
 
@@ -39,6 +41,8 @@ Modes: `fast` ~$0.10 · `standard` ~$0.50 · `heavy` ~$2.50 · `max` ~$15. Defau
 
 ### 1. Baseline
 
+Focused semantic query; no `site:` / boolean operators.
+
 ```bash
 python .cursor/skills/batch-research/scripts/research_runner.py single \
   --query "TOPIC" --output "output/research_init.md" --mode fast
@@ -46,9 +50,10 @@ python .cursor/skills/batch-research/scripts/research_runner.py single \
 
 ### 2. Ideation → `output/ideas.json`
 
-Decompose the baseline — go **deeper**, not broader. Treat baseline headings as the allowed menu.
+Decompose the baseline — go **deeper**, not broader. Treat baseline headings as the allowed menu. Valyu rule: split multi-facet asks into separate queries (this skill’s purpose).
 
 - Each query drills one existing facet (mechanism, comparison, evidence, edge cases, implementation).
+- Keep each query concise and specific (prefer under ~400 chars); no search operators.
 - **Litmus:** all ideas merged should still fit under the baseline’s top-level headings. No new parent domains.
 - Prefer breadth *across* facets of the same subject; each query goes deep on its facet.
 
@@ -65,6 +70,8 @@ Decompose the baseline — go **deeper**, not broader. Treat baseline headings a
 Queries may also be `{"query": "..."}` objects (extra keys like `id`/`track` are ignored by the runner).
 
 ### 3. Batch
+
+Default `--mode fast` for breadth. Escalate to `standard` (or heavier) only for denser facets after cost review—avoid `heavy`/`max` × N without explicit budget.
 
 ```bash
 # Async (recommended for ≥5 queries or modes heavier than fast)
@@ -92,7 +99,7 @@ python .cursor/skills/batch-research/scripts/research_runner.py retry \
   --mode fast --max-cost 2.00
 ```
 
-Retry merges successes back into the original manifest. Summarize with filepath × major findings. Then optionally:
+Retry merges successes back into the original manifest. Summarize with filepath × major findings. Reports usually include `## Sources` for optional OpenAlex audit:
 
 ```bash
 python .cursor/skills/verify-references/scripts/verify_references.py verify --max-cost 1.0
@@ -117,4 +124,5 @@ Estimate: `num_queries × mode_cost`. Abort before API if over `--max-cost`. Buf
 - Never hardcode/log `VALYU_API_KEY` (runner loads `.env`).
 - Always pass `--max-cost`. Prefer `--no-wait` for large/slow batches.
 - Retry failures before final summary.
+- Source scope: `[valyu] categories` / `VALYU_CATEGORIES` → first token → `search.category`. Use `research` (or similar) for academic-leaning batches; omit for open-web breadth.
 - Artifacts: `{output-dir}/manifest.json`, `{output-dir}/active_batches.json`, `output/active_tasks.json` (single `--no-wait`).

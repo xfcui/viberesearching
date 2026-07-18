@@ -12,7 +12,7 @@ description: >-
 
 One topic → fast baseline → one narrowed deep query → heavy research. Outputs under `output/`.
 
-**Not this skill:** many parallel facets → `batch-research`. Talk storytelling/visuals → `enrich-research`. Citation audit → `verify-references`.
+**Not this skill:** many parallel facets → `batch-research`. Talk storytelling/visuals → `enrich-research`. Citation audit → `verify-references`. Quick cited lookup → Answer/Search via `.agents/skills/valyu-best-practices` (do not spend DeepResearch on that).
 
 **Runner:** `.cursor/skills/deep-research/scripts/research_runner.py`
 
@@ -22,7 +22,9 @@ One topic → fast baseline → one narrowed deep query → heavy research. Outp
 | `status` | Poll + download |
 | `respond` | Reply to HITL checkpoint |
 
-Modes: `fast` ~$0.10 · `standard` ~$0.50 · `heavy` ~$2.50 · `max` ~$15. Default `--max-cost` $3.00.
+Modes: `fast` ~$0.10 (~5 min) · `standard` ~$0.50 (~10–20 min) · `heavy` ~$2.50 (~90 min) · `max` ~$15 (SDK mode; longest). Default `--max-cost` $3.00.
+
+Shared Valyu rules: `.cursor/rules/valyu-api.mdc`.
 
 ---
 
@@ -38,6 +40,8 @@ Modes: `fast` ~$0.10 · `standard` ~$0.50 · `heavy` ~$2.50 · `max` ~$15. Defau
 
 ### 1. Baseline
 
+Write a focused natural-language query (specific terminology, timeframe if useful). No `site:` / boolean operators.
+
 ```bash
 python .cursor/skills/deep-research/scripts/research_runner.py run \
   --query "MAIN_TOPIC" --output "output/research_init.md" --mode fast
@@ -45,9 +49,10 @@ python .cursor/skills/deep-research/scripts/research_runner.py run \
 
 ### 2. Deep ideation → `output/deep_research_idea.md`
 
-Go **deeper**, not broader. Pick the densest facet already central in the baseline.
+Go **deeper**, not broader. Pick the densest facet already central in the baseline. Valyu rule: one topic per query—do not pack a survey essay into the deep query.
 
 - Query must be a strict subset of the main topic (more detail/mechanism/comparison/evidence on that facet).
+- Prefer concise, semantic phrasing (under ~400 chars when practical).
 - **Litmus:** every plausible deep-report section fits under one existing baseline heading. No new top-level domains.
 
 ```markdown
@@ -68,7 +73,7 @@ Go **deeper**, not broader. Pick the densest facet already central in the baseli
 
 ### 3. Heavy research
 
-Prefer `--no-wait` for heavy/max (often 30+ min):
+Prefer `--no-wait` for heavy/max (`heavy` often ~90 min):
 
 ```bash
 python .cursor/skills/deep-research/scripts/research_runner.py run \
@@ -85,7 +90,7 @@ python .cursor/skills/deep-research/scripts/research_runner.py status \
 
 ### 4. Synthesis
 
-Compare `research_init.md` vs `research_deep.md`: structure/depth, source quality, fast vs heavy cost-benefit.
+Compare `research_init.md` vs `research_deep.md`: structure/depth, source quality, fast vs heavy cost-benefit. Completed reports typically include a `## Sources` block for optional verification.
 
 ### 5. Optional reference verification
 
@@ -125,12 +130,15 @@ python .cursor/skills/deep-research/scripts/research_runner.py respond \
 
 ## Cost & practices
 
-| Mode | Est. | `--max-cost` |
-|---|---|---|
-| fast | $0.10 | $1 |
-| standard | $0.50 | $2 |
-| heavy | $2.50 | $5 |
-| max | $15 | $20 |
+| Mode | Est. | Duration | `--max-cost` |
+|---|---|---|---|
+| fast | $0.10 | ~5 min | $1 |
+| standard | $0.50 | ~10–20 min | $2 |
+| heavy | $2.50 | ~90 min | $5 |
+| max | $15 | longest | $20 |
 
 - Never hardcode/log `VALYU_API_KEY`. Always pass `--max-cost`.
 - `--no-wait` for heavy/max; state in `output/active_tasks.json`.
+- Source scope today: `[valyu] categories` / `VALYU_CATEGORIES` → first token → `search.category`. Omit for all sources.
+- `max` is SDK-supported in this repo (beyond some vendored three-mode tables).
+- Quick lookups → Answer/Search in `valyu-best-practices`, not this skill.

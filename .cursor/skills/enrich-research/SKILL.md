@@ -41,6 +41,7 @@ Paths may differ — use `@` mentions. Ask once if missing. Optional: `work/prin
 4. **Scope:** techniques usable on this deck (patterns, anti-patterns, speech/visual moves). Not literature tours of the talk’s domain.
 5. **Preserve** the idea’s palette/motifs as constraints. Do not rewrite the outline unless asked.
 6. **Secrets:** never read `.env` into chat; runner loads `VALYU_API_KEY`.
+7. **Categories:** `[valyu] categories=research` (or similar) often biases enrich toward academic corpora—wrong for storytelling/visuals. Prefer unset/all sources for enrich runs. See `.cursor/rules/valyu-api.mdc`.
 
 ### Content-page count
 
@@ -104,7 +105,7 @@ Rough split: ~half S / half V / ≤2 X.
 }
 ```
 
-Runner sends only `query` strings. Keep `id`/`track` for local maps. Each query: specific, deck-actionable, in-scope. One query may cover a cluster of related slides.
+Runner sends only `query` strings. Keep `id`/`track` for local maps. Each query: specific, deck-actionable, in-scope; prefer under ~400 chars; no `site:` / boolean operators or domain lit-review phrasing. One query may cover a cluster of related slides.
 
 **Litmus:** merged reports deepen craft for the existing spine, not a new domain.
 

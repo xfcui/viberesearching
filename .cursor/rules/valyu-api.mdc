@@ -6,9 +6,35 @@ alwaysApply: false
 
 # Valyu API Best Practices
 
-This rule enforces best practices for integrating and working with the Valyu DeepResearch API, ensuring security, cost safety, robust execution, and proper Human-in-the-Loop (HITL) handling.
+This rule enforces best practices for integrating and working with the Valyu API—security, cost safety, query craft, source scoping, robust execution, and Human-in-the-Loop (HITL) handling.
 
-## 1. API Key Security & Configuration
+For the full Search / Contents / Answer / DeepResearch cookbook, see `.agents/skills/valyu-best-practices/` (especially `references/prompting.md` and `references/deepresearch-recipes/`).
+
+## 0. Choosing the Right API
+
+| Need | Use | How in this workspace |
+|---|---|---|
+| Find sources across web/academic/news | Search API | `valyu-best-practices` + official `valyu` SDK |
+| Extract clean text from known URLs | Contents API | `valyu-best-practices` |
+| Quick cited answer / fact check | Answer API | `valyu-best-practices` (prefer over DeepResearch for lookups) |
+| Comprehensive markdown research report | DeepResearch API | Project runners: `deep-research`, `batch-research`, `enrich-research` |
+
+Do **not** spend DeepResearch budget on questions Answer or Search can resolve.
+
+## 1. SDK Only — No Raw HTTP
+
+When writing code that calls Valyu, use the official Python SDK (`valyu`). Never make raw `requests`/`fetch` calls to `api.valyu.ai`.
+
+```python
+from valyu import Valyu
+
+client = Valyu(api_key=os.environ.get("VALYU_API_KEY"))
+# client.search(...), client.contents(...), client.answer(...), client.deepresearch.create(...)
+```
+
+DeepResearch runners use `query`, `mode`, and `output_formats` (SDK names). Treat recipe aliases like `input` / `model` / singular `output_format` as legacy.
+
+## 2. API Key Security & Configuration
 
 **Never** hardcode the Valyu API key. Load it dynamically with the following priority order:
 
@@ -19,7 +45,7 @@ This rule enforces best practices for integrating and working with the Valyu Dee
 
 ```python
 # ❌ BAD: Hardcoding the API key or ad-hoc reading of .env
-client = Valyu(api_key="val_9491f67be7e56c44aa78912c...")
+client = Valyu(api_key="val_your-api-key-here")
 
 # ✅ GOOD: Loading securely using python-dotenv and configparser
 import os
@@ -31,10 +57,10 @@ from valyu import Valyu
 def get_valyu_client() -> Valyu:
     env_path = Path.cwd() / ".env"
     load_dotenv(env_path)
-    
+
     # Try environment variable first
     api_key = os.getenv("VALYU_API_KEY")
-    
+
     # Fallback to [valyu] section in .env
     if not api_key and env_path.exists():
         try:
@@ -46,24 +72,58 @@ def get_valyu_client() -> Valyu:
                 api_key = parser.get("valyu", "api_key", fallback="").strip()
         except Exception:
             pass
-            
+
     if not api_key:
         raise ValueError("VALYU_API_KEY not found in environment or .env file.")
     return Valyu(api_key=api_key)
 ```
 
----
+## 3. Query Craft
 
-## 2. Cost Safety Guardrails
+Valyu uses semantic search. Better queries → better results.
+
+1. **Be specific** — domain terminology, not vague nouns.
+2. **Be concise** — prefer under ~400 characters for search-like asks.
+3. **Be focused** — one topic per query; split multi-facet asks (use batch-research).
+4. **Add constraints** — timeframe, method, evidence type when relevant.
+5. **No search operators** — avoid `site:`, `OR`/`AND`, and quote-as-boolean tricks; scope with parameters or category instead.
+
+```
+BAD:  "I want to know about AI"
+GOOD: "transformer attention mechanism survey 2024"
+
+BAD:  site:arxiv.org CRISPR OR "gene editing"
+GOOD: "CRISPR off-target effects therapeutic applications 2024"
+```
+
+## 4. Source Scoping (Current Runners)
+
+Project DeepResearch runners pass optional search config from env:
+
+- `[valyu] categories` in `.env`, or `VALYU_CATEGORIES`
+- First comma-separated token → `search={"category": "<token>"}`
+- Omit / comment out `categories` to search all sources
+
+Allowed categories include: `research`, `healthcare`, `patents`, `markets`, `company`, `economic`, `predictions`, `legal`, `politics`, `cybersecurity`, `transportation`.
+
+For talk craft (`enrich-research`), usually **omit** `categories` (especially `research`) so storytelling/visual sources are not biased toward academic corpora.
+
+CLI `included_sources` / date filters are not exposed on runners yet; do not invent unsupported flags.
+
+## 5. Mode Costs & Durations
+
+| Mode | Est. cost | Typical duration | Notes |
+|---|---|---|---|
+| `fast` | $0.10 | ~5 min | Baselines, enrich batches |
+| `standard` | $0.50 | ~10–20 min | Balanced depth |
+| `heavy` | $2.50 | ~90 min | Single deep dives; use `--no-wait` |
+| `max` | $15.00 | longest | SDK-supported in this repo; use `--no-wait` |
+
+`max` is first-class here even if some vendored docs only list three modes.
+
+## 6. Cost Safety Guardrails
 
 Every task or batch submission must perform a cost check before calling the API. Abort execution if the estimated cost exceeds the safety limit (`--max-cost`, defaulting to `$3.00`).
-
-### Mode Costs
-
-- `fast`: $0.10 per task
-- `standard`: $0.50 per task
-- `heavy`: $2.50 per task
-- `max`: $15.00 per task
 
 ### Cost Check Example
 
@@ -80,27 +140,21 @@ def check_cost_limit(mode: str, max_cost: float, task_count: int = 1):
         sys.exit(f"Error: Estimated cost ${estimated:.2f} exceeds limit of ${max_cost:.2f}. Aborting.")
 ```
 
----
-
-## 3. Asynchronous Execution for Long Tasks
+## 7. Asynchronous Execution for Long Tasks
 
 For tasks that take 10+ minutes (`heavy` or `max` modes, or batches with 5+ queries), use **asynchronous execution** (`--no-wait`) to prevent blocking the agent or client thread.
 
 - Save task/batch metadata to state files (e.g., `output/active_tasks.json` or `output/active_batches.json`).
 - Provide a `status` command or polling mechanism to check progress and download results later.
 
----
+## 8. Human-in-the-Loop (HITL) Checkpoints
 
-## 4. Human-in-the-Loop (HITL) Checkpoints
-
-For high-stakes research, enable HITL checkpoints (`plan_review`, `source_review`).
+For high-stakes research, enable HITL checkpoints (`plan_review`, `source_review`) via the **deep-research** runner (`--hitl`). Batch path has no HITL—use deep-research for gated single dives.
 
 - Write checkpoint data to `output/checkpoint.json`.
 - Wait for a user response in `output/checkpoint_response.json`.
 - Return the response to the SDK's `on_interaction` callback.
 
----
-
-## 5. Batch & Retry Workflows
+## 9. Batch & Retry Workflows
 
 For multi-query research, run tasks in parallel using the batch API. Maintain a `manifest.json` to track task statuses (`completed`, `failed`, `cancelled`), and implement a retry mechanism to re-run only failed tasks.
