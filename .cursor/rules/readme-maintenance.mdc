@@ -5,7 +5,8 @@ alwaysApply: true
 
 # README Maintenance
 
-Single user-facing doc: `README.md`. No other project `.md` docs.
+`README.md` is the only top-level user-facing guide. Skill-internal
+`SKILL.md` and reference files are allowed under `.cursor/skills/`.
 
 ## Audience & tone
 
@@ -43,7 +44,7 @@ Single user-facing doc: `README.md`. No other project `.md` docs.
 Document argparse exactly — run `--help` or read `add_argument` in:
 
 | README section | Script |
-|----------------|--------|
+| --- | --- |
 | `research-single-topic` | `.cursor/skills/research-single-topic/scripts/research_runner.py` |
 | `research-multi-angle` | `.cursor/skills/research-multi-angle/scripts/research_runner.py` |
 | `research-verify` | `.cursor/skills/research-verify/scripts/verify_references.py` |
@@ -61,7 +62,7 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 ## Canonical paths
 
 | Artifact | Path |
-|----------|------|
+| --- | --- |
 | Full reports | `work/<topic-slug>/research_init.md`, `work/<topic-slug>/research_deep.md`, `work/<topic-slug>/researchNN_*.md` |
 | Full ideation / outcomes | `work/<topic-slug>/research_idea.md`, `work/<topic-slug>/ideas.json`, `work/<topic-slug>/manifest.json` |
 | Deep reports | `work/deep/research_init.md`, `work/deep/research_deep.md` |
@@ -78,12 +79,11 @@ Output examples must use these paths (`work/<topic-slug>/...`, `work/deep/...`, 
 ## Configuration rules
 
 - Source of truth: `.env.example` (never paste real keys)
-- Document priority: CLI flags > `VALYU_API_KEY` / `OPENALEX_API_KEY` > `[valyu]` / `[openalex]` INI
+- Credentials: `VALYU_API_KEY` / `OPENALEX_API_KEY` > `[valyu]` /
+  `[openalex]` INI
+- Supported runtime settings: CLI flag > environment variable > INI
 - Categories list must match `.env.example` comments
-- Note: `research-comprehensive` pins `VALYU_CATEGORIES=research` on every
-  research submission
-- Note: content enrichment prefers unset/all sources over
-  `categories = research` unless the user explicitly wants one corpus
+- Runtime research policy belongs in `valyu-api.mdc`, not this README rule
 
 ## Update when
 
@@ -101,6 +101,6 @@ Output examples must use these paths (`work/<topic-slug>/...`, `work/deep/...`, 
 - ✅ Placeholder secrets only (`your-*-api-key-here`)
 - ❌ Documenting `ship-it` (or any internal-only skill)
 - ❌ Documenting removed skills / runners
-- ❌ New markdown files outside README
+- ❌ New top-level user guides besides README
 - ❌ Documenting vibesliding `src.*.cli` modules (wrong repo)
 - ❌ Stale flags, paths, or cost numbers after runner edits

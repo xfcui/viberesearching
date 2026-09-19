@@ -18,7 +18,7 @@ Cursor skills + Valyu DeepResearch runners handle the boring parts: async pollin
 ## Pick a path
 
 | You want… | Use | Shape | Outputs |
-|-----------|-----|-------|---------|
+| --- | --- | --- | --- |
 | One topic with maximum depth and breadth | `research-comprehensive` | 1 fast + 1 heavy + ≤12 standard | `work/<topic-slug>/*` |
 | One topic, done thoroughly | `research-single-topic` | 1 fast + 1 heavy | `work/deep/research_init.md` → `work/deep/research_deep.md` |
 | Many facets of one topic, in parallel | `research-multi-angle` | 1 fast + ≤12 standard | `work/batch/ideas.json` + `work/batch/researchNN_*.md` |
@@ -60,7 +60,7 @@ supplied content (`research-enrich`).
 # Comprehensive: one topic directory, research sources pinned throughout
 VALYU_CATEGORIES=research python \
   .cursor/skills/research-single-topic/scripts/research_runner.py run \
-  --query "YOUR_TOPIC with 2024–2026 academic results and industry advances" \
+  --query "YOUR_TOPIC with recent results and industry signals in research literature" \
   --output work/YOUR_TOPIC_SLUG/research_init.md --mode fast --max-cost 1.00
 VALYU_CATEGORIES=research python \
   .cursor/skills/research-single-topic/scripts/research_runner.py run \
@@ -77,7 +77,7 @@ VALYU_CATEGORIES=research python \
   .cursor/skills/research-multi-angle/scripts/research_runner.py batch \
   --queries-file work/YOUR_TOPIC_SLUG/ideas.json \
   --output-dir work/YOUR_TOPIC_SLUG \
-  --name "Full Research: YOUR_TOPIC" \
+  --name "Comprehensive Research: YOUR_TOPIC" \
   --mode standard --no-wait --max-cost 7.00
 
 # Single-topic: same topic at heavy, precisely specified + poll
@@ -106,7 +106,8 @@ python .cursor/skills/research-multi-angle/scripts/research_runner.py batch \
 python .cursor/skills/research-multi-angle/scripts/research_runner.py status \
   --batch-id "BATCH_ID" --output-dir work/batch
 python .cursor/skills/research-multi-angle/scripts/research_runner.py retry \
-  --manifest work/batch/manifest.json --output-dir work/batch --mode standard --max-cost 2.00
+  --manifest work/batch/manifest.json --output-dir work/batch \
+  --mode standard --max-cost 2.00
 
 # Multi-angle: free local drift audit of finished reports
 python .cursor/skills/research-multi-angle/scripts/research_runner.py scope-check \
@@ -134,20 +135,16 @@ python .cursor/skills/research-verify/scripts/verify_references.py retry \
 ### `research-single-topic` (`research_runner.py`)
 
 | Command | Option | Description |
-|---------|--------|-------------|
+| --- | --- | --- |
 | `run` | `--query` | Research query (required) |
 | `run` | `--output` | Markdown report path (required) |
 | `run` | `--main-topic` | Baseline topic the query must cover in full (omit for the baseline) |
 | `run` | `--mode` | `fast` / `standard` / `heavy` / `max` (default: `fast`) |
-| `run` | `--no-wait` | Submit and exit; state in `work/deep/tmp_state.json` |
+| `run` | `--no-wait` | Submit and exit; state beside the output report |
 | `run` | `--max-cost` | Abort if estimate exceeds USD (default: `3.0`) |
 | `run` | `--hitl` | Enable `plan_review` / `source_review` checkpoints |
 | `run` | `--no-anchor` | Do not attach the main topic to the submitted query |
-| `run` | `--allow-drift` | Downgrade scope-check errors to warnings (also permits a narrow query) |
-
-With `--main-topic`, `run` aborts when the query shares no terminology with
-the topic (wrong subject) or covers less than half of it (narrowed to one
-facet — that is `research-multi-angle`'s shape).
+| `run` | `--allow-drift` | Downgrade local scope errors to warnings |
 | `status` | `--task-id` | Task ID to poll (required) |
 | `status` | `--output` | Path to save report if completed |
 | `respond` | `--task-id` | Task ID awaiting input (required) |
@@ -157,16 +154,22 @@ facet — that is `research-multi-angle`'s shape).
 | `enrich-check` | `--main-topic` | Topic to judge drift against (default: the baseline's title) |
 | `enrich-check` | `--allow-drop` | Baseline facet left out on purpose (substring, repeatable) |
 
+With `--main-topic`, the local lexical gate rejects a different subject or a
+query covering too few distinctive topic terms. Semantic breadth and
+boundaries still require agent review.
+
 ### `research-multi-angle` (`research_runner.py`)
 
 | Command | Option | Description |
-|---------|--------|-------------|
+| --- | --- | --- |
 | `single` | `--query` | Research query (required) |
 | `single` | `--output` | Markdown report path (required) |
 | `single` | `--main-topic` | Parent topic to anchor the query to |
 | `single` | `--mode` | `fast` / `standard` / `heavy` / `max` (default: `fast`) |
 | `single` | `--no-wait` | Submit and exit without polling |
 | `single` | `--max-cost` | Max allowed cost in USD (default: `3.0`) |
+| `task-status` | `--task-id` | Single-task ID to poll (required) |
+| `task-status` | `--output` | Path to save report if completed |
 | `batch` | `--queries-file` | JSON with `queries` list (required) |
 | `batch` | `--output-dir` | Reports + `manifest.json` directory (required) |
 | `batch` | `--name` | Batch name (default: `Batch Research Task`) |
@@ -190,7 +193,7 @@ facet — that is `research-multi-angle`'s shape).
 ### `research-verify` (`verify_references.py`)
 
 | Command | Option | Description |
-|---------|--------|-------------|
+| --- | --- | --- |
 | `verify` / `retry` | `--input` | Glob or file, recursive (default: `work/**/*.md`) |
 | `verify` / `retry` | `--rate` | Max OpenAlex requests/sec (default: `5`) |
 | `verify` / `retry` | `--sim-threshold` | Title similarity threshold (default: `0.8`) |
@@ -213,7 +216,7 @@ work/deep/
 ├── research_init.md              # fast baseline report
 ├── research_idea.md              # refined query + scope contract
 ├── research_deep.md              # heavy report on the same topic
-├── research_deep.json            # research-verify sidecar (audit only)
+├── {report}.json                 # optional research-verify sidecars
 └── tmp_*.json                    # async + HITL state, removed on success
 ```
 
@@ -266,18 +269,22 @@ globbed or guessed.
 }
 ```
 
-The runner attaches `main_topic` to every submitted query and rejects queries that share no distinctive terminology with it — before spending anything. Anchors land in `manifest.json` so retries and `scope-check` stay on topic. A plain `"queries": ["...", "..."]` list still works, but runs unanchored.
+The runner attaches `main_topic` to every submitted query and applies a local
+lexical drift check before spending. Stable IDs, original/submitted queries,
+anchors, optional tracks, filenames, and retry lineage land in
+`manifest.json`. A plain `"queries": ["...", "..."]` list still works, but
+runs without structured anchors.
 
 ### Cost reference
 
-| Mode | Approx. cost / task | Suggested `--max-cost` |
-|------|---------------------|------------------------|
+| Mode | Approx. cost / task | Example single-task limit |
+| --- | --- | --- |
 | `fast` | ~$0.10 | $1.00 |
-| `standard` | ~$0.50 | $2.00 |
+| `standard` | ~$0.50 | $1.00 |
 | `heavy` | ~$2.50 | $5.00 |
 | `max` | ~$15.00 | $20.00 |
 
-Per path: comprehensive ≈ $0.10 + $2.50 + up to 12 × $0.50
+Planned base cost per path: comprehensive ≈ $0.10 + $2.50 + up to 12 × $0.50
 (~$8.60; submission limits `$1.00` / `$5.00` / `$7.00`), single-topic ≈
 $0.10 + $2.50, multi-angle ≈ $0.10 + up to 12 × $0.50
 (`--max-cost 7.00`), enrich ≈ `query_count × $0.10`.
@@ -286,17 +293,19 @@ Estimate ≈ `num_queries × mode_cost`; runners abort before the API call if ov
 
 ## Configuration
 
-Copy `.env.example` → `.env`. Priority: CLI flags > env vars > INI sections.
+Copy `.env.example` → `.env`. Credentials use environment variables before
+INI values. Supported runtime settings use CLI flags before environment
+variables before INI values.
 
 | Section | Used by | Key settings |
-|---------|---------|--------------|
+| --- | --- | --- |
 | *(preamble)* | External tools | `MINIMAX_API_KEY` |
 | `[valyu]` | Comprehensive / single-topic / multi-angle / enrich runners | `api_key`, `categories` |
 | `[openalex]` | research-verify | `api_key`, `mailto` (both optional) |
 
 - **Valyu** — `VALYU_API_KEY` overrides `[valyu] api_key`
 - **OpenAlex** — optional; verify works without it. A key ([free](https://openalex.org/settings/api)) raises the daily cap, and `mailto` joins the polite pool. `OPENALEX_API_KEY` / `OPENALEX_MAILTO` override the INI values
-- **Categories** — `research`, `healthcare`, `patents`, `markets`, `company`,
+- **Category** — choose one of `research`, `healthcare`, `patents`, `markets`, `company`,
   `economic`, `predictions`, `legal`, `politics`, `cybersecurity`,
   `transportation` (omit to search all; `research-comprehensive` explicitly
   pins `research`, while content enrichment usually prefers unset/all so it

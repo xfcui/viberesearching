@@ -1,228 +1,206 @@
 ---
-description: Valyu API DeepResearch best practices and cost safety guardrails
-globs: **/*.{py,md}
+description: Shared Valyu research stages, runtime contracts, and cost safety
+globs: **/*.{py,md,mdc}
 alwaysApply: false
 ---
 
-# Valyu API Best Practices
+# Valyu Research Contract
 
-This rule enforces best practices for integrating and working with the Valyu API—security, cost safety, query craft, source scoping, robust execution, and Human-in-the-Loop (HITL) handling.
+This rule is the source of truth for every research skill and runner. Skills
+define which stages to compose; they do not redefine shared API, cost, source,
+scope, or async policy.
 
-## 0. Choosing the Right API
+## 1. Choose the right workflow
 
-| Need | Use | How in this workspace |
-|---|---|---|
-| Find sources across web/academic/news | Search API | Official `valyu` SDK — no runner in this repo |
-| Extract clean text from known URLs | Contents API | Official `valyu` SDK — no runner in this repo |
-| Quick cited answer / fact check | Answer API | Official `valyu` SDK — prefer over DeepResearch for lookups |
-| Comprehensive markdown research report | DeepResearch API | Project runners: `research-comprehensive`, `research-single-topic`, `research-multi-angle`, `research-enrich` |
+| User outcome | Skill | Stage composition |
+| --- | --- | --- |
+| One topic with depth and breadth | `research-comprehensive` | fast init → heavy refined → standard fan-out |
+| One full-scope report | `research-single-topic` | fast init → heavy refined |
+| Parallel facets of one topic | `research-multi-angle` | fast init → standard fan-out |
+| Strengthen supplied content | `research-enrich` | supplied content → fast fan-out |
+| Audit scholarly citations | `research-verify` | OpenAlex citation audit |
 
-Do **not** spend DeepResearch budget on questions Answer or Search can resolve.
+Use the Valyu Answer/Search API—not DeepResearch—for quick cited answers,
+fact checks, source discovery, or extraction from known URLs.
 
-## 1. SDK Only — No Raw HTTP
+## 2. Shared stages
 
-When writing code that calls Valyu, use the official Python SDK (`valyu`). Never make raw `requests`/`fetch` calls to `api.valyu.ai`.
+### Fast init
 
-```python
-from valyu import Valyu
+One unanchored `fast` task establishes the topic's correct sense,
+terminology, evidence landscape, and substantive headings.
 
-client = Valyu(api_key=os.environ.get("VALYU_API_KEY"))
-# client.search(...), client.contents(...), client.answer(...), client.deepresearch.create(...)
-```
+- Read the report before promoting it.
+- Repeat cheaply when the sense, framing, recency, or headings are wrong.
+- The promoted artifact is `research_init.md`.
+- Never anchor a baseline to itself.
 
-DeepResearch runners use `query`, `mode`, and `output_formats` (SDK names). Treat recipe aliases like `input` / `model` / singular `output_format` as legacy.
+### Heavy refined
 
-## 2. API Key Security & Configuration
+One `heavy` task restates the promoted baseline's **whole topic** more
+precisely.
 
-**Never** hardcode the Valyu API key. Load it dynamically with the following priority order:
+- Write `research_idea.md` first: scope terms, retained facets, dated recency
+  window, deliberate drops, boundaries, evidence bar, and formulated query.
+- Pass `--main-topic`; do not narrow to one facet.
+- Submit with `--no-wait`.
+- Run the local coverage audit (`enrich-check`) after collection.
+- Treat lexical runner checks as heuristics. The agent must review semantic
+  subject preservation, baseline-facet coverage, and boundaries.
 
-1. Environment variable: `VALYU_API_KEY`
-2. `.env` file `[valyu]` INI section: `api_key`
+### Fan-out
 
-### API Key Loading Example
+An anchored batch researches strict subsets of a parent topic or supplied
+content.
 
-```python
-# ❌ BAD: Hardcoding the API key or ad-hoc reading of .env
-client = Valyu(api_key="val_your-api-key-here")
+- Comprehensive and multi-angle: `standard`, maximum 12 queries.
+- Enrich: `fast`, no fixed count; real content gaps and `--max-cost` are the
+  limits.
+- Every structured query has a stable ID, substantive anchor, and one focused
+  question.
+- Keep `main_topic`, `anchor_terms`, and `anchor_headings` in `ideas.json`.
+- Retry only failed/cancelled entries and preserve their identity, filename,
+  source scope, and manifest history.
 
-# ✅ GOOD: Loading securely using python-dotenv and configparser
-import os
-import configparser
-from pathlib import Path
-from dotenv import load_dotenv
-from valyu import Valyu
+## 3. Query and evidence contract
 
-def get_valyu_client() -> Valyu:
-    env_path = Path.cwd() / ".env"
-    load_dotenv(env_path)
+Valyu uses semantic search:
 
-    # Try environment variable first
-    api_key = os.getenv("VALYU_API_KEY")
+1. Use precise domain terminology.
+2. Prefer one focused question under roughly 400 characters (under 250 for
+   fan-out so the parent anchor still fits).
+3. Add explicit dates, method, and evidence constraints.
+4. Do not use `site:`, Boolean operators, or quote-as-Boolean tricks.
+5. For recent-advances research, prefer named papers, groups, mechanisms,
+   products, platforms, quantitative results, and deltas over generic surveys.
+6. Safety, security, regulation, and market sizing are standalone subjects
+   only when the user asks; otherwise include them only where they explain an
+   advance.
 
-    # Fallback to [valyu] section in .env
-    if not api_key and env_path.exists():
-        try:
-            text = env_path.read_text(encoding="utf-8")
-            start = text.find("[valyu]")
-            if start != -1:
-                parser = configparser.ConfigParser()
-                parser.read_string(text[start:])
-                api_key = parser.get("valyu", "api_key", fallback="").strip()
-        except Exception:
-            pass
+Express recency as a dated query constraint, not as a `Recent Developments`
+or `Emerging` anchor.
 
-    if not api_key:
-        raise ValueError("VALYU_API_KEY not found in environment or .env file.")
-    return Valyu(api_key=api_key)
-```
+## 4. Source profiles
 
-## 3. Query Craft
+Runners resolve one optional category from:
 
-Valyu uses semantic search. Better queries → better results.
+1. `VALYU_CATEGORIES` when set, including an explicitly empty value;
+2. `[valyu] categories` in `.env`;
+3. no category (all sources).
 
-1. **Be specific** — domain terminology, not vague nouns.
-2. **Be concise** — prefer under ~400 characters for search-like asks.
-3. **Be focused** — one topic per query; split multi-facet asks (use
-   `research-multi-angle`).
-4. **Add constraints** — timeframe, method, evidence type when relevant.
-5. **No search operators** — avoid `site:`, `OR`/`AND`, and quote-as-boolean tricks; scope with parameters or category instead.
+The current SDK request supports one category through these runners. Do not
+describe the setting as a multi-category union.
 
-```
-BAD:  "I want to know about AI"
-GOOD: "transformer attention mechanism survey 2024"
+Allowed categories: `research`, `healthcare`, `patents`, `markets`,
+`company`, `economic`, `predictions`, `legal`, `politics`,
+`cybersecurity`, `transportation`.
 
-BAD:  site:arxiv.org CRISPR OR "gene editing"
-GOOD: "CRISPR off-target effects therapeutic applications 2024"
-```
+| Workflow | Source contract |
+| --- | --- |
+| Comprehensive | Explicit `VALYU_CATEGORIES=research` on every submission |
+| Single-topic | User-selected/inherited; clear to all sources when mixed industry coverage is required |
+| Multi-angle | User-selected/inherited; keep one profile across init, fan-out, and retry |
+| Enrich | Explicit `VALYU_CATEGORIES=` unless the user requests a corpus |
+| Verify | OpenAlex only; non-scholarly sources are outside its verification coverage |
 
-## 4. Source Scoping (Current Runners)
+Because comprehensive is research-only, describe industry results honestly as
+**industry signals reported in papers and preprints**. Do not imply company,
+patent, market, or open-web coverage.
 
-Project DeepResearch runners pass optional search config from env:
+## 5. API and secrets
 
-- `[valyu] categories` in `.env`, or `VALYU_CATEGORIES`
-- First comma-separated token → `search={"category": "<token>"}`
-- Omit / comment out `categories` to search all sources
+Use the official Python `valyu` SDK. Never make raw HTTP requests to Valyu.
 
-Allowed categories include: `research`, `healthcare`, `patents`, `markets`, `company`, `economic`, `predictions`, `legal`, `politics`, `cybersecurity`, `transportation`.
+Credentials:
 
-For content enrichment (`research-enrich`), usually **omit** `categories`
-(especially `research`) so the run can use the source types best suited to
-the supplied content. Same for any brief covering **industry** alongside
-academia — pipelines, products, and partnerships do not live in research
-corpora. An explicitly empty `VALYU_CATEGORIES=` clears the INI value for a
-single run.
+1. `VALYU_API_KEY`
+2. `[valyu] api_key` in `.env`
 
-CLI `included_sources` / date filters are not exposed on runners yet; do not invent unsupported flags.
+Never hardcode, log, print, or document real keys. `.env` remains local and
+untracked.
 
-## 5. Mode Costs & Durations
+Supported runtime settings use: CLI flag → environment variable → INI value.
+Do not claim a CLI override exists for settings the parsers do not expose.
 
-| Mode | Est. cost | Typical duration | Notes |
-|---|---|---|---|
-| `fast` | $0.10 | ~5 min | Baselines, enrich batches |
-| `standard` | $0.50 | ~10–20 min | Balanced depth |
-| `heavy` | $2.50 | ~90 min | Single deep dives; use `--no-wait` |
-| `max` | $15.00 | longest | SDK-supported in this repo; use `--no-wait` |
+## 6. Cost and async safety
 
-`max` is first-class here even if some vendored docs only list three modes.
+| Mode | Estimated cost/task | Typical duration |
+| --- | ---: | --- |
+| `fast` | $0.10 | ~5 min |
+| `standard` | $0.50 | ~10–20 min |
+| `heavy` | $2.50 | ~90 min |
+| `max` | $15.00 | longest |
 
-## 6. Cost Safety Guardrails
+Every submission performs a preflight `--max-cost` check. A workflow total is
+not a hard cap: repeated probes, retries, and citation audits add spend.
 
-Every task or batch submission must perform a cost check before calling the API. Abort execution if the estimated cost exceeds the safety limit (`--max-cost`, defaulting to `$3.00`).
+Use `--no-wait` for:
 
-### Cost Check Example
+- every `heavy` or `max` task;
+- batches and retry batches with five or more tasks.
 
-```python
-# ❌ BAD: Submitting tasks without cost estimation or guardrails
-task = client.deepresearch.create(query=query, mode="heavy")
+Smaller fast/standard batches may wait synchronously when the user wants to
+stay in session.
 
-# ✅ GOOD: Estimating and validating cost before submission
-MODE_COSTS = {"fast": 0.10, "standard": 0.50, "heavy": 2.50, "max": 15.00}
+Async metadata lives in `{work dir}/tmp_state.json`. Before submitting,
+resume/status any matching live task or batch so duplicate spend is avoided.
+State is removed only after successful collection; partial failures retain
+the information needed for retry.
 
-def check_cost_limit(mode: str, max_cost: float, task_count: int = 1):
-    estimated = MODE_COSTS.get(mode, 0.50) * task_count
-    if estimated > max_cost:
-        sys.exit(f"Error: Estimated cost ${estimated:.2f} exceeds limit of ${max_cost:.2f}. Aborting.")
-```
+## 7. Scope contract
 
-## 7. Asynchronous Execution for Long Tasks
-
-For tasks that take 10+ minutes (`heavy` or `max` modes, or batches with 5+ queries), use **asynchronous execution** (`--no-wait`) to prevent blocking the agent or client thread.
-
-- Save task/batch metadata to the work directory's `tmp_state.json`.
-- Provide a `status` command or polling mechanism to check progress and download results later.
-
-## 8. Human-in-the-Loop (HITL) Checkpoints
-
-For high-stakes research, enable HITL checkpoints (`plan_review`,
-`source_review`) via the **research-single-topic** runner (`--hitl`).
-Multi-angle research has no HITL—use `research-single-topic` for gated single
-dives.
-
-- Write checkpoint data to `work/deep/tmp_checkpoint.json`.
-- Wait for a user response in `work/deep/tmp_checkpoint_response.json`.
-- Return the response to the SDK's `on_interaction` callback.
-
-## 9. Batch & Retry Workflows
-
-For multi-query research, run tasks in parallel using the batch API. Maintain a `manifest.json` to track task statuses (`completed`, `failed`, `cancelled`), and implement a retry mechanism to re-run only failed tasks.
-
-## 10. Scope Anchoring & Drift Control
-
-Follow-up queries reach Valyu as standalone strings. Without an anchor, a sub-query is researched as whatever topic it reads like on its own, so a batch drifts away from the baseline one query at a time. Every follow-up must therefore carry its parent topic.
-
-### Two shapes of second pass
-
-| Skill | Second pass is | Relation to the baseline topic | Gate |
-|---|---|---|---|
-| `research-multi-angle`, `research-enrich` | ≤12 drill-downs, one per facet | each query is a strict **subset** | anchored per query (below) |
-| `research-single-topic` | one heavy run, precisely specified | the query restates the **whole topic** | full-scope coverage |
-
-The anchor machinery below governs drill-downs. For
-`research-single-topic` there is no per-query anchor heading: the baseline's
-H2s become the coverage facets the single query must span, and the runner
-errors when the query covers less than half the main topic's distinctive
-terms — that means it narrowed to a facet instead of sharpening the topic.
-
-### Scope contract (drill-downs)
-
-The ideation artifact declares the scope once, and every query points back into it:
+Fan-out `ideas.json`:
 
 ```json
 {
-  "main_topic": "Representation learning of small molecules",
-  "anchor_terms": ["molecular representation", "small molecule"],
-  "anchor_headings": ["1. Fundamentals", "2. Neural Architectures"],
+  "main_topic": "Parent topic or supplied-content subject",
+  "anchor_terms": ["distinctive phrase 1", "distinctive phrase 2"],
+  "anchor_headings": ["Substantive heading", "Stable passage label"],
   "queries": [
-    {"id": "Q01", "anchor": "2. Neural Architectures", "query": "..."}
+    {
+      "id": "Q01",
+      "track": "optional workflow track",
+      "anchor": "Substantive heading",
+      "query": "Focused drill-down"
+    }
   ]
 }
 ```
 
-`anchor_headings` are the baseline report's H2s for multi-angle research, or
-headings and stable passage labels taken from the user's source content for
-enrichment. Runners attach the parent topic to each submitted query
-automatically (`--no-anchor` opts out) and persist `main_topic` / `anchor`
-into `manifest.json` so retries and audits stay anchored.
+Ineligible anchors include Executive Summary, Conclusion, Sources,
+References, Applications, Future Directions, Recent Developments, Emerging,
+Data Gaps, and Research Priorities.
 
-### Ineligible anchors
+Agent review applies three tests:
 
-A heading that summarises or open-endedly extends the report cannot constrain anything — anchoring to one licenses unlimited breadth. These are rejected:
+1. **Anchor:** the query resolves to a substantive declared anchor.
+2. **Subject:** its subject remains the parent subject.
+3. **Transfer:** it would not fit naturally under a different main topic.
 
-`Executive Summary` · `Conclusion` · `Sources` / `References` · anything matching `Applications` · `Future Directions` · `Recent Developments` · `Emerging`
+The local gate enforces exact anchor membership, rejects catch-all anchors,
+and checks distinctive token overlap. It does **not** prove semantic subject,
+transfer, full facet coverage, or boundary compliance. `--allow-drift`
+downgrades local errors only; use it for genuinely equivalent unusual
+wording, not convenience.
 
-### Three-test gate
+## 8. Artifacts and recovery
 
-Apply to every drill-down query before submitting:
+- Reports are Markdown; manifests and temporary state are JSON.
+- `tmp_state.json` may contain task and batch entries keyed by their IDs.
+- Batch manifests preserve stable input ID, original/submitted query, anchor,
+  optional track, status, filename, sources, and retry lineage.
+- Async and synchronous retry merge into the original manifest; they never
+  replace successful history with retry-only results.
+- Write state and manifests atomically.
+- Completed batch reports are authoritative through `manifest.json`, not
+  filename ordering.
+- OpenAlex writes `{report}.json` sidecars and never rewrites reports.
 
-1. **Anchor test** — it resolves to a substantive anchor heading, not a catch-all.
-2. **Subject test** — the query's subject is still the main topic's subject. Under a scan-RNN baseline, "vision Mamba 2D spatial scanning" fails: the subject became vision models.
-3. **Transfer test** — if the query would read naturally in a report on a *different* main topic, it is drift.
+## 9. HITL
 
-For a `research-single-topic` heavy query, swap the anchor test for a
-**breadth test** (spans every coverage facet, and nothing beyond the topic)
-and add a **boundary test** (the ideation note names the adjacent fields the
-run must not wander into). The subject test still applies.
+HITL belongs to the heavy single-topic stage.
 
-Sharing only generic vocabulary (`neural`, `network`, `model`, `learning`, `system`) is not a pass. The runners enforce this locally before any API spend and abort on failure; `--allow-drift` downgrades errors to warnings when a query is genuinely in scope but worded unusually.
-
-After reports land, `scope-check` audits their headings against the manifest's anchors — free, no API calls.
+- Write checkpoint details to `{work dir}/tmp_checkpoint.json`.
+- Accept user input from `{work dir}/tmp_checkpoint_response.json`.
+- Invalid JSON remains paused and must never auto-approve.
+- Delete checkpoint files only after a valid response is accepted.

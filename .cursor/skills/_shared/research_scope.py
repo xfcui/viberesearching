@@ -15,6 +15,7 @@ topic, so it is gated with
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -354,6 +355,25 @@ def tmp_state_path(work_dir: Union[str, Path]) -> Path:
     return Path(work_dir) / TMP_STATE_NAME
 
 
+def atomic_write_json(path: Union[str, Path], data: Any) -> Path:
+    """Write JSON beside its destination, then atomically replace it."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temp_path = Path(handle.name)
+        json.dump(data, handle, indent=2, ensure_ascii=False)
+        handle.write("\n")
+    temp_path.replace(path)
+    return path
+
+
 def append_state(work_dir: Union[str, Path], entry: dict) -> Path:
     """Append an async task/batch entry to the work directory's temp state."""
     state_path = tmp_state_path(work_dir)
@@ -361,7 +381,7 @@ def append_state(work_dir: Union[str, Path], entry: dict) -> Path:
 
     entries = _read_state(state_path)
     entries.append(entry)
-    state_path.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(state_path, entries)
     return state_path
 
 
@@ -372,7 +392,7 @@ def drop_state_entry(work_dir: Union[str, Path], key: str, value: str) -> None:
         return
     entries = [e for e in _read_state(state_path) if e.get(key) != value]
     if entries:
-        state_path.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
+        atomic_write_json(state_path, entries)
     else:
         state_path.unlink(missing_ok=True)
 

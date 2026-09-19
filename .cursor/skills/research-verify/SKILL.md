@@ -1,88 +1,62 @@
 ---
 name: research-verify
 description: >-
-  Verify and enrich research report citations via OpenAlex. Parses ## Sources
-  from markdown reports, deduplicates lookups, writes audit-only {file}.json
-  sidecars, supports retry. Use after research-comprehensive,
-  research-single-topic, research-multi-angle, or research-enrich when
-  the user wants reference verification or bibliographic enrichment.
+  Audit scholarly citations in research reports through OpenAlex. Parses
+  numbered Markdown Sources or References blocks, deduplicates lookups, writes
+  audit-only JSON sidecars, and supports retry. Use after any report-producing
+  research workflow when the user wants bibliographic verification.
 ---
 
-# Research Citation Verification
+# Research Citation Audit
 
-Resolve citations in research reports against OpenAlex. Reads the `## Sources` (or `## References`) block from markdown (default `work/**/*.md`), writes audit-only `{file}.json` sidecars. **Never modifies reports.** Files without a `## Sources` block are skipped, so ideation notes and briefs get no sidecar; batch `manifest.json` source lists are not the verify input format.
+**Stage: completed reports → OpenAlex sidecars.**
+
+This skill never rewrites reports. It verifies scholarly works; ordinary
+company pages, news, blogs, and other non-scholarly sources are outside
+OpenAlex coverage and must not be described as false merely because OpenAlex
+cannot resolve them.
 
 **Runner:** `.cursor/skills/research-verify/scripts/verify_references.py`
 
-| Command | Purpose |
-|---|---|
-| `verify` | Verify refs in report `.md` files |
-| `retry` | Re-run unverified/errored records from sidecars |
+## Contract
 
-| Flag | Default / notes |
-|---|---|
-| `--input` | `work/**/*.md` (recursive) |
-| `--rate` | 5 req/s |
-| `--sim-threshold` | 0.8 (title search) |
-| `--max-cost` | Abort if OpenAlex estimate exceeds |
-| `--retries` | 4 (429/5xx/network only) |
-| `--cache` | `auto` — one `openalex_cache.json` per report directory |
-| `--no-cache` / `--refresh-cache` | Cache control |
-| `--force-search` | (`retry`) skip singleton; force title search |
-| `--refs` | (`retry`) sidecar path/glob |
+- Input: report Markdown containing a numbered `## Sources` or
+  `## References` block.
+- Output: `{report}.json` beside each report.
+- Files without a source block are skipped.
+- DOI, PMID, and arXiv identifiers are resolved directly; remaining scholarly
+  titles use OpenAlex search.
+- Cache defaults to one `openalex_cache.json` per report directory.
+- Verification is an audit, not a report-editing step.
 
-Identifiers resolve for free: DOIs, PMIDs, and arXiv IDs (looked up through their `10.48550/arXiv.*` DOI). Everything else falls back to a $0.0001 title search.
-
-Details: [reference.md](reference.md) (progress formats, cost model, sidecar schema).
-
----
+Details and sidecar schema: [reference.md](reference.md).
 
 ## Workflow
 
-Optional final phase after `research-comprehensive`,
-`research-single-topic`, `research-multi-angle`, or `research-enrich`. Run in
-the foreground and **relay per-reference progress** to the user.
-
-### 1. Verify
-
-Scope `--input` to the skill directory you just ran; the bare default sweeps every report under `work/`.
+Scope input to the workflow directory:
 
 ```bash
 python .cursor/skills/research-verify/scripts/verify_references.py verify \
-  --input "work/batch/*.md" --max-cost 1.0
+  --input "work/deep/*.md" --max-cost 1.0
 ```
 
-Single report:
-
-```bash
-python .cursor/skills/research-verify/scripts/verify_references.py verify \
-  --input "work/deep/research_deep.md" --max-cost 1.0
-```
-
-### 2. Retry failures
+Relay per-reference progress. On unresolved or errored records:
 
 ```bash
 python .cursor/skills/research-verify/scripts/verify_references.py retry \
-  --input "work/batch/*.md"
+  --input "work/deep/*.md"
 ```
 
-Or:
+Use `--force-search` only when a singleton identifier/title lookup was wrong
+or incomplete and title search is the intended fallback.
 
-```bash
-python .cursor/skills/research-verify/scripts/verify_references.py retry \
-  --input "work/batch/research_init.md" --force-search
-```
+Interpret results carefully:
 
-Retry merges into existing sidecars; verified records stay untouched. Anything still unresolved is re-queried — only positives are cached, so `retry` never short-circuits on a stale miss.
+- `verified` means OpenAlex found a compatible scholarly record;
+- `not_found` means OpenAlex did not resolve it, not that the citation is
+  necessarily false;
+- `error` means lookup failed and is retryable;
+- non-scholarly sources require source-appropriate review outside this skill.
 
-Reach for `retry` when a run reports `rate_limited`, `budget_exceeded`, `skipped`, or `network_error`. A `not_found` on a blog or vendor page usually means OpenAlex has no such record, and repeat runs will not change that.
-
----
-
-## Practices
-
-- **Audit-only** — enrichment only in `{file}.json`.
-- `OPENALEX_API_KEY` is optional (it raises the daily cap); `OPENALEX_MAILTO` joins the polite pool. Load both from `.env`; never log the key.
-- Prefer `--rate 5` + `--max-cost`; use `retry` next day if daily budget is exhausted.
-- Retry errored refs before presenting final verification summary.
-- Cache files are machine-generated; keep gitignored.
+Never print or expose OpenAlex credentials. Follow
+`.cursor/rules/valyu-api.mdc` for shared secret and artifact policy.

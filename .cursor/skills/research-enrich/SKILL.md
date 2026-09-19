@@ -1,215 +1,125 @@
 ---
 name: research-enrich
 description: >-
-  Fast-mode Valyu batch research that enriches any user-supplied content with
-  current evidence, examples, context, counterpoints, and useful source
-  material. Accepts notes, drafts, articles, reports, outlines, presentations,
-  or pasted text and writes work/enrich/*. Use when the user wants to
-  strengthen existing content without replacing its purpose or structure.
-  Not for open-ended topic exploration or a standalone deep dive.
+  Fast Valyu fan-out that strengthens any user-supplied content with current
+  evidence, examples, context, counterpoints, and source material. Accepts
+  notes, drafts, articles, reports, outlines, presentations, or pasted text.
+  Use when existing content is the spine and should be preserved. Not for an
+  open-ended topic baseline or a heavy standalone report.
 ---
 
 # Research Enrichment
 
-**Shape: user content + no baseline + focused fast researches bounded by
-`--max-cost`.** Enrich what already exists. Reuse
-`.cursor/skills/research-multi-angle/scripts/research_runner.py`; do not
-invent another client.
+**Stages: supplied content → fast fan-out.**
 
-**Not this skill:** open-ended multi-facet topic exploration →
-`research-multi-angle`. One full-scope heavy dive →
-`research-single-topic`. Complete fast → heavy → batch research →
-`research-comprehensive`.
+Follow `.cursor/rules/valyu-api.mdc` for shared fan-out, source, cost, async,
+scope, and recovery policy. This workflow has no fast topic baseline and no
+heavy stage; the supplied content is already the scope.
 
-## Inputs
+Use `research-multi-angle` when the goal is a new topic survey rather than
+strengthening existing content.
 
-**Source content is exactly what the user provides.** Accept `@` mentions,
-any path, or text pasted into chat. Never assume filenames, glob the
-workspace, or guess at missing source material. One source is enough. If no
-content was supplied, ask once and wait.
+## Inputs and outputs
 
-Examples include:
+Use exactly the content the user provides: any path, `@` mention, or pasted
+text. Never glob, guess filenames, or silently choose extra sources. If no
+content was supplied, ask once.
 
-- notes, briefs, proposals, and plans;
-- article, report, paper, or documentation drafts;
-- scripts, outlines, curricula, and presentations;
-- product, strategy, or design documents;
-- unstructured pasted text.
+```text
+work/enrich/
+├── brief.md
+├── ideas.json
+├── researchNN_*.md
+├── manifest.json
+└── tmp_state.json
+```
 
-Optional context: audience, desired outcome, publication format, constraints,
-and the sections the user most wants strengthened.
-
-## Output
-
-**All artifacts → `work/enrich/`** unless the user requests another output
-directory:
-
-| File | Who writes |
-| --- | --- |
-| `brief.md` | Agent — resolved inputs, content intent, gaps, scope contract |
-| `ideas.json` | Agent — anchored enrichment queries |
-| `researchNN_*.md`, `manifest.json` | Runner |
-| `tmp_state.json` | Runner — async state, auto-removed on success |
-
-Research reports provide enrichment material. Do not rewrite the user's
-source unless they separately ask for integration or editing.
-
-## Hard rules
-
-1. **Mode:** always `--mode fast`.
-2. **Budget:** `--max-cost` is the ceiling. Choose queries from real content
-   gaps; never pad to spend the budget.
-3. **No baseline:** batch only. The supplied content already provides the
-   spine and scope.
-4. **Preserve intent:** research strengthens the content's purpose, audience,
-   voice, claims, and structure; it does not silently replace them.
-5. **Anchor every query:** each query must trace to a supplied heading,
-   passage, claim, or explicit content goal.
-6. **No generic survey:** research only material that can improve the given
-   content.
-7. **Secrets:** never read `.env` into chat; the runner loads
-   `VALYU_API_KEY`.
-8. **Categories:** prefer unset/all sources unless the user explicitly wants
-   one corpus. `categories = research` can miss current products, companies,
-   examples, and public context. Use `VALYU_CATEGORIES=` to clear it for this
-   run.
+Research reports form an enrichment pack. Do not rewrite the source unless
+the user separately requests integration.
 
 ## Workflow
 
 ```text
-- [ ] 1 Resolve supplied content, intent, and enrichment gaps
-- [ ] 2 Write brief.md
-- [ ] 3 Write ideas.json
-- [ ] 4 Submit fast batch --no-wait (or status an existing batch)
-- [ ] 5 Collect, retry failures, and map findings back to the content
+- [ ] 1 Resolve supplied content, intent, primary spine, and gaps
+- [ ] 2 Write work/enrich/brief.md
+- [ ] 3 Write anchored tracks → work/enrich/ideas.json
+- [ ] 4 Fast fan-out
+- [ ] 5 Collect, retry, and map findings back to passages
 ```
 
-### 1. Resolve the content
+Check `work/enrich/tmp_state.json` first and resume matching live work.
 
-Read only the user-supplied sources. Identify:
+### 1. Resolve and brief
 
-- the content's purpose, audience, and existing structure;
-- claims that need evidence or updating;
-- sections that need examples, comparisons, mechanisms, or quantitative data;
-- missing context, counterpoints, implications, or practical details;
-- visual or storytelling opportunities only when the format benefits from
-  them;
-- explicit boundaries: what must remain unchanged or out of scope.
+Identify:
 
-Derive a scope contract:
+- purpose, audience, format, and primary content spine;
+- claims needing evidence or updating;
+- gaps needing examples, mechanisms, comparisons, counterpoints, or data;
+- visual/storytelling opportunities only when the format benefits;
+- passages, voice, structure, and constraints to preserve.
 
-- `main_topic` — "research enrichment for [specific supplied content]";
-- `anchor_terms` — distinctive subject terms plus the content's intended use;
-- `anchor_headings` — actual headings or section labels from the content. For
-  unstructured text, create stable short labels tied to quoted passages or
-  paragraph purposes.
+Write `brief.md` with resolved inputs, content intent, gaps, boundaries,
+stable heading/passage labels, chosen query count, and budget.
 
-If `work/enrich/tmp_state.json` contains a live batch ID, status it before
-submitting another batch.
+### 2. Ideas
 
-### 2. Write `brief.md`
+Choose only tracks justified by actual gaps:
 
-Keep it short:
-
-- resolved source list;
-- purpose, audience, and format;
-- what is already strong;
-- concrete enrichment gaps;
-- boundaries and preserve-as-is constraints;
-- scope contract;
-- chosen query count, budget, and track split.
-
-### 3. Write `ideas.json`
-
-Choose only tracks that match actual gaps:
-
-| Track | IDs | Use for |
+| Track | IDs | Purpose |
 | --- | --- | --- |
-| evidence | `E##` | Verify/update claims, primary sources, quantitative data |
-| examples | `X##` | Cases, implementations, analogies, concrete illustrations |
-| context | `C##` | Mechanisms, history, comparisons, implications |
-| counterpoint | `Q##` | Limitations, competing evidence, credible objections |
-| visual | `V##` | Diagrams, imagery, demonstrations, only when useful |
+| evidence | `E##` | Claims, primary sources, quantitative data |
+| examples | `X##` | Cases, implementations, concrete illustrations |
+| context | `C##` | Mechanisms, comparisons, implications |
+| counterpoint | `Q##` | Limitations and credible objections |
+| visual | `V##` | Diagrams or demonstrations when useful |
 
 ```json
 {
-  "main_topic": "research enrichment for THIS supplied content",
+  "main_topic": "Actual subject of the supplied content",
   "anchor_terms": ["distinctive subject phrase", "content purpose"],
-  "anchor_headings": ["Actual section", "Claim or passage label"],
-  "context": {
-    "content_type": "...",
-    "audience": "...",
-    "purpose": "...",
-    "preserve": ["..."]
-  },
+  "anchor_headings": ["Actual heading", "Stable passage label"],
   "queries": [
     {
       "id": "E01",
       "track": "evidence",
-      "anchor": "Actual section",
-      "query": "Focused research question that directly strengthens this section"
+      "anchor": "Actual heading",
+      "query": "Focused question that directly strengthens this passage"
     }
   ]
 }
 ```
 
-The runner sends only each `query`, anchored to `main_topic`; the remaining
-fields keep the local mapping auditable. Prefer queries under ~250 characters.
-Do not use `site:`, Boolean operators, or unrelated literature-review asks.
+If a result cannot map to a declared passage, heading, claim, or content goal,
+the query is too broad.
 
-**Drift test:** if a finding cannot be mapped to a specific passage, heading,
-claim, or content goal, the query is too broad.
+### 3. Fast fan-out
 
-### 4. Submit
-
-Clear category scoping so enrichment can use the most suitable academic,
-industry, news, and public sources:
+Clear category scoping unless the user requested a corpus:
 
 ```bash
 VALYU_CATEGORIES= python \
   .cursor/skills/research-multi-angle/scripts/research_runner.py batch \
   --queries-file "work/enrich/ideas.json" \
   --output-dir "work/enrich" \
-  --name "Research enrichment: <short source title>" \
-  --mode fast \
-  --max-queries 0 \
-  --no-wait \
-  --max-cost <chosen budget>
+  --name "Research Enrichment: <source title>" \
+  --mode fast --max-queries 0 --no-wait \
+  --max-cost <chosen-budget>
 ```
 
-`--max-queries 0` removes the multi-angle skill's 12-query cap;
-`--max-cost` remains the hard ceiling. Tell the user the batch ID. Synchronous
-waiting is acceptable only for five or fewer queries when the user wants to
-stay in session.
+Query count is budget-limited, not capped at 12. Do not pad the batch.
 
-### 5. Collect and map findings
+Collect with `status`. Retry failed/cancelled entries in `fast` mode using
+`failed_count × $0.10` plus a small buffer and the same all-source override.
 
-```bash
-python .cursor/skills/research-multi-angle/scripts/research_runner.py status \
-  --batch-id "BATCH_ID" --output-dir "work/enrich"
-```
+## Handoff
 
-Retry failures:
+For every manifest entry, report:
 
-```bash
-VALYU_CATEGORIES= python \
-  .cursor/skills/research-multi-angle/scripts/research_runner.py retry \
-  --manifest "work/enrich/manifest.json" \
-  --output-dir "work/enrich" --mode fast --max-cost 2.00
-```
-
-Summarize each report as:
-
-- report path and track;
-- source heading, passage, or goal it enriches;
+- report path, track, and source anchor;
 - 1–3 usable findings;
-- whether the finding supports, updates, complicates, or contradicts the
-  current content;
-- suggested integration point, without rewriting unless asked.
+- whether each supports, updates, complicates, or contradicts the content;
+- suggested integration point without rewriting the source.
 
-Optional citation audit:
-
-```bash
-python .cursor/skills/research-verify/scripts/verify_references.py verify \
-  --input "work/enrich/*.md" --max-cost 1.0
-```
+`research-verify` can audit scholarly citations. OpenAlex cannot validate
+ordinary company pages, news, blogs, or other non-scholarly sources.

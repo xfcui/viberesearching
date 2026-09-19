@@ -13,7 +13,13 @@ from research_env import (  # noqa: E402
     get_valyu_client,
     resolve_work_dir as _resolve_work_dir,
 )
+from research_runtime import (  # noqa: E402
+    collect_single_task,
+    exit_on_runtime_error,
+    run_single_task,
+)
 from research_scope import (  # noqa: E402
+    atomic_write_json,
     anchor_query,
     audit_report_scope,
     append_state,
@@ -44,14 +50,30 @@ def check_query_limit(query_count: int, max_queries: Optional[int]):
         sys.exit(1)
 
 
-def save_batch_results(client, batch_id: str, output_dir: Path, scope: Optional[dict] = None) -> tuple[list[dict], bool]:
+def report_filename(ordinal: int, query: str) -> str:
+    query_clean = "".join(c if c.isalnum() or c in " _-" else "_" for c in query)
+    query_slug = query_clean.replace(" ", "_").replace("/", "_").replace("'", "").lower()[:50]
+    return f"research{ordinal:02d}_{query_slug}.md"
+
+
+def save_batch_results(
+    client,
+    batch_id: str,
+    output_dir: Path,
+    scope: Optional[dict] = None,
+    *,
+    write_manifest: bool = True,
+    manifest_path: Optional[Path] = None,
+) -> tuple[list[dict], bool]:
     """Download batch results; return (manifest, all_succeeded)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Fetching results and saving to {output_dir}...")
 
     scope = scope or {}
     main_topic = scope.get("main_topic", "")
-    by_query = {entry.get("submitted", ""): entry for entry in scope.get("entries", [])}
+    by_query: dict[str, list[dict]] = {}
+    for entry in scope.get("entries", []):
+        by_query.setdefault(entry.get("submitted", ""), []).append(entry)
 
     manifest = []
     last_key = None
@@ -67,17 +89,17 @@ def save_batch_results(client, batch_id: str, output_dir: Path, scope: Optional[
 
         for task in results.tasks:
             task_count += 1
-            query_clean = "".join(c if c.isalnum() or c in " _-" else "_" for c in task.query)
-            query_slug = query_clean.replace(" ", "_").replace("/", "_").replace("'", "").lower()[:50]
-            filename = f"research{task_count:02d}_{query_slug}.md"
+            candidates = by_query.get(task.query, [])
+            origin = candidates.pop(0) if candidates else {}
+            ordinal = origin.get("ordinal") or task_count
+            filename = origin.get("filename") or report_filename(ordinal, origin.get("original_query") or task.query)
             filepath = output_dir / filename
-
-            output_text = task.output or "No output generated."
-            filepath.write_text(output_text, encoding="utf-8")
-            print(f"  Saved: {filename}")
 
             if task.status != "completed":
                 all_succeeded = False
+            elif task.output:
+                filepath.write_text(task.output, encoding="utf-8")
+                print(f"  Saved: {filename}")
 
             sources_list = []
             if task.sources:
@@ -87,16 +109,20 @@ def save_batch_results(client, batch_id: str, output_dir: Path, scope: Optional[
                         "url": getattr(src, "url", ""),
                     })
 
-            origin = by_query.get(task.query, {})
             manifest.append({
                 "task_id": task.task_id,
                 "id": origin.get("id"),
                 "query": task.query,
+                "original_query": origin.get("original_query", task.query),
                 "main_topic": origin.get("main_topic", main_topic),
                 "anchor": origin.get("anchor"),
+                "track": origin.get("track"),
+                "ordinal": ordinal,
+                "retry_of_task_id": origin.get("retry_of_task_id"),
+                "search_config": scope.get("search_config"),
                 "status": task.status,
                 "cost": task.cost,
-                "filename": filename,
+                "filename": filename if task.status == "completed" else origin.get("filename"),
                 "sources": sources_list,
                 "error": getattr(task, "error", None),
             })
@@ -105,10 +131,36 @@ def save_batch_results(client, batch_id: str, output_dir: Path, scope: Optional[
         if not last_key:
             break
 
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"  Saved manifest to {manifest_path}")
+    if write_manifest:
+        destination = manifest_path or (output_dir / "manifest.json")
+        atomic_write_json(destination, manifest)
+        print(f"  Saved manifest to {destination}")
     return manifest, all_succeeded
+
+
+def merge_retry_results(original: list[dict], retry_results: list[dict]) -> list[dict]:
+    """Replace only the failed entries targeted by retry results."""
+    merged = list(original)
+    by_task_id = {
+        entry.get("task_id"): index
+        for index, entry in enumerate(merged)
+        if entry.get("task_id")
+    }
+    by_id = {
+        entry.get("id"): index
+        for index, entry in enumerate(merged)
+        if entry.get("id")
+    }
+
+    for result in retry_results:
+        index = by_task_id.get(result.get("retry_of_task_id"))
+        if index is None and result.get("id"):
+            index = by_id.get(result["id"])
+        if index is None:
+            merged.append(result)
+        else:
+            merged[index] = result
+    return merged
 
 
 def finish_batch(output_dir: Path, batch_id: str, all_succeeded: bool):
@@ -129,9 +181,6 @@ def handle_single(args):
     client = get_valyu_client()
     output_path = Path(args.output)
     work_dir = resolve_work_dir(args.output)
-    mode = args.mode
-    no_wait = getattr(args, "no_wait", False)
-    max_cost = getattr(args, "max_cost", None)
     main_topic = getattr(args, "main_topic", None)
 
     query = args.query
@@ -141,64 +190,29 @@ def handle_single(args):
         if not getattr(args, "no_anchor", False):
             query = anchor_query(query, main_topic)
 
-    check_cost_limit(mode, max_cost)
-
-    print(f"Creating deep research task in '{mode}' mode...")
-    print(f"Query: {query}")
-
-    kwargs: dict[str, Any] = {
-        "query": query,
-        "mode": mode,
-        "output_formats": ["markdown"],
-    }
-
-    search_config = get_search_config()
-    if search_config:
-        print(f"Applying search configuration: {search_config}")
-        kwargs["search"] = search_config
-
-    task = client.deepresearch.create(**kwargs)
-
-    if not task.success:
-        print(f"Error: Failed to create task. Response: {task}", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Task created successfully. Task ID: {task.deepresearch_id}")
-
-    if no_wait:
-        state_path = append_state(work_dir, {
-            "kind": "task",
-            "task_id": task.deepresearch_id,
-            "query": query,
-            "main_topic": main_topic,
-            "mode": mode,
-            "output": str(output_path),
-            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        })
-        print(f"Task submitted in --no-wait mode. State saved to {state_path}.")
-        print("Use the 'status' command to check progress later.")
-        return
-
-    print("Waiting for completion...")
-
-    result = client.deepresearch.wait(
-        task.deepresearch_id,
+    exit_on_runtime_error(lambda: run_single_task(
+        client=client,
+        query=query,
+        output_path=output_path,
+        work_dir=work_dir,
+        mode=args.mode,
+        no_wait=getattr(args, "no_wait", False),
+        max_cost=getattr(args, "max_cost", None),
+        main_topic=main_topic,
         poll_interval=10,
-        on_progress=lambda s: print(f"  Status: {s.status}"),
-    )
+    ))
 
-    if result.status != "completed":
-        print(f"Error: Task failed with status '{result.status}'. Details: {result.error}", file=sys.stderr)
-        sys.exit(1)
 
-    print("Task completed successfully!")
-    print(f"Report cost: ${result.cost:.2f}")
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_text = result.output or "No output generated."
-    output_path.write_text(output_text, encoding="utf-8")
-    print(f"Report saved to {output_path}")
-    purge_tmp(work_dir, "task_id", task.deepresearch_id)
+def handle_task_status(args):
+    """Collect a `single --no-wait` task."""
+    output_path = Path(args.output) if args.output else None
+    work_dir = resolve_work_dir(args.output)
+    exit_on_runtime_error(lambda: collect_single_task(
+        client=get_valyu_client(),
+        task_id=args.task_id,
+        output_path=output_path,
+        work_dir=work_dir,
+    ))
 
 
 def handle_batch(args):
@@ -223,14 +237,18 @@ def handle_batch(args):
     anchoring = bool(main_topic) and not getattr(args, "no_anchor", False)
     scope_entries = []
     queries = []
-    for entry in entries:
+    for ordinal, entry in enumerate(entries, start=1):
         submitted = anchor_query(entry["query"], main_topic) if anchoring else entry["query"]
         queries.append({"query": submitted})
         scope_entries.append({
             "submitted": submitted,
+            "original_query": entry["query"],
             "id": entry.get("id"),
             "anchor": entry.get("anchor"),
+            "track": entry.get("track"),
             "main_topic": main_topic,
+            "ordinal": ordinal,
+            "filename": report_filename(ordinal, entry["query"]),
         })
     scope = {"main_topic": main_topic, "entries": scope_entries}
 
@@ -242,6 +260,7 @@ def handle_batch(args):
     }
 
     search_config = get_search_config()
+    scope["search_config"] = search_config
     if search_config:
         print(f"Applying search configuration: {search_config}")
         kwargs["search"] = search_config
@@ -289,7 +308,10 @@ def handle_batch(args):
 
     _, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
     finish_batch(output_dir, batch_id, all_succeeded)
-    print("Batch research completed successfully!")
+    if all_succeeded:
+        print("Batch research completed successfully!")
+    else:
+        print("Batch completed with failures; use retry before final synthesis.")
 
 
 def handle_status(args):
@@ -317,8 +339,24 @@ def handle_status(args):
     if batch_status in ("completed", "completed_with_errors"):
         print(f"  Batch completed! Total cost: ${batch_info.cost:.2f}")
         if output_dir:
-            scope = load_batch_scope(output_dir, batch_id)
-            _, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
+            state = load_batch_state(output_dir, batch_id)
+            scope = state.get("scope", {})
+            retry_manifest_path = state.get("retry_manifest_path")
+            if retry_manifest_path:
+                retry_results, all_succeeded = save_batch_results(
+                    client,
+                    batch_id,
+                    output_dir,
+                    scope,
+                    write_manifest=False,
+                )
+                manifest_path = Path(retry_manifest_path)
+                original = json.loads(manifest_path.read_text(encoding="utf-8"))
+                merged = merge_retry_results(original, retry_results)
+                atomic_write_json(manifest_path, merged)
+                print(f"  Merged retry results into {manifest_path}")
+            else:
+                _, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
             finish_batch(output_dir, batch_id, all_succeeded)
         else:
             print("  Provide --output-dir to download and save results.")
@@ -326,15 +364,15 @@ def handle_status(args):
         print(f"  Batch ended with status: {batch_status}")
 
 
-def load_batch_scope(output_dir: Path, batch_id: str) -> dict:
-    """Recover the anchor map a --no-wait batch stored at submit time."""
+def load_batch_state(output_dir: Path, batch_id: str) -> dict:
+    """Recover one async batch entry stored at submit time."""
     state_path = tmp_state_path(output_dir)
     if not state_path.exists():
         return {}
     try:
         for entry in json.loads(state_path.read_text(encoding="utf-8")):
             if entry.get("batch_id") == batch_id:
-                return entry.get("scope", {})
+                return entry
     except Exception:
         pass
     return {}
@@ -372,15 +410,21 @@ def handle_retry(args):
     anchoring = not getattr(args, "no_anchor", False)
     scope_entries = []
     failed_queries = []
-    for entry in failed:
+    for ordinal, entry in enumerate(failed, start=1):
         topic = entry.get("main_topic") or ""
-        submitted = anchor_query(entry["query"], topic) if anchoring else entry["query"]
+        original_query = entry.get("original_query") or entry["query"]
+        submitted = anchor_query(original_query, topic) if anchoring else original_query
         failed_queries.append({"query": submitted})
         scope_entries.append({
             "submitted": submitted,
+            "original_query": original_query,
             "id": entry.get("id"),
             "anchor": entry.get("anchor"),
+            "track": entry.get("track"),
             "main_topic": topic,
+            "ordinal": entry.get("ordinal") or ordinal,
+            "filename": entry.get("filename"),
+            "retry_of_task_id": entry.get("task_id"),
         })
     scope = {"main_topic": scope_entries[0]["main_topic"] if scope_entries else "", "entries": scope_entries}
 
@@ -391,7 +435,11 @@ def handle_retry(args):
         "output_formats": ["markdown"],
     }
 
-    search_config = get_search_config()
+    if failed and "search_config" in failed[0]:
+        search_config = failed[0].get("search_config")
+    else:
+        search_config = get_search_config()
+    scope["search_config"] = search_config
     if search_config:
         kwargs["search"] = search_config
 
@@ -411,6 +459,7 @@ def handle_retry(args):
             "output_dir": str(output_dir),
             "query_count": len(failed_queries),
             "scope": scope,
+            "retry_manifest_path": str(manifest_path.resolve()),
             "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         })
         print(f"Retry batch submitted in --no-wait mode. State saved to {state_path}.")
@@ -429,17 +478,23 @@ def handle_retry(args):
     print(f"\nRetry batch finished with status: {final.batch.status}")
     print(f"Total cost: ${final.batch.cost:.2f}")
 
-    retry_manifest, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
+    retry_manifest, all_succeeded = save_batch_results(
+        client,
+        batch_id,
+        output_dir,
+        scope,
+        write_manifest=False,
+    )
 
-    # Merge retry results back into the original manifest
-    retried = {e["query"] for e in failed}
-    merged = [e for e in manifest if e["query"] not in retried]
-    merged.extend(retry_manifest)
-    manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
+    merged = merge_retry_results(manifest, retry_manifest)
+    atomic_write_json(manifest_path, merged)
     print(f"Merged retry results back into {manifest_path}")
 
     finish_batch(output_dir, batch_id, all_succeeded)
-    print("Retry completed successfully!")
+    if all_succeeded:
+        print("Retry completed successfully!")
+    else:
+        print("Retry completed with failures; state was kept for another retry.")
 
 
 def handle_scope_check(args):
@@ -516,6 +571,13 @@ def main():
     parser_single.add_argument("--max-cost", type=float, default=3.0, help="Max allowed cost in USD (default: 3.0)")
     add_scope_flags(parser_single)
 
+    # --- task-status: collect an async single task ---
+    parser_task_status = subparsers.add_parser(
+        "task-status", help="Check and collect a submitted single task"
+    )
+    parser_task_status.add_argument("--task-id", required=True, help="The deepresearch task ID")
+    parser_task_status.add_argument("--output", default=None, help="Path to save report if completed")
+
     # --- batch: run parallel batch research ---
     parser_batch = subparsers.add_parser("batch", help="Run a batch of deep research tasks")
     parser_batch.add_argument("--queries-file", required=True, help="JSON file with queries list")
@@ -563,6 +625,8 @@ def main():
 
     if args.command == "single":
         handle_single(args)
+    elif args.command == "task-status":
+        handle_task_status(args)
     elif args.command == "batch":
         handle_batch(args)
     elif args.command == "status":
