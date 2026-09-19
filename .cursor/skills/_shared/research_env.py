@@ -58,7 +58,7 @@ def read_ini_section(env_path: Path, section_name: str) -> dict[str, str]:
 
 def get_valyu_client():
     """Valyu client from `VALYU_API_KEY` or the `[valyu]` section. Never hardcoded."""
-    # Imported here so verify-references can reuse the env helpers above without
+    # Imported here so research-verify can reuse the env helpers above without
     # requiring the Valyu SDK.
     from valyu import Valyu
 
@@ -73,11 +73,17 @@ def get_valyu_client():
 
 
 def get_search_config() -> Optional[dict[str, Any]]:
-    """Optional `search.category` from `VALYU_CATEGORIES` / `[valyu] categories`."""
+    """Optional `search.category` from `VALYU_CATEGORIES` / `[valyu] categories`.
+
+    An explicitly empty `VALYU_CATEGORIES` means "search all sources" and wins
+    over the INI, so a single run can opt out without editing `.env`.
+    """
     env_path = find_env_file()
     load_dotenv(env_path)
     section = read_ini_section(env_path, "valyu")
-    categories = os.getenv("VALYU_CATEGORIES") or section.get("categories")
+    categories = os.getenv("VALYU_CATEGORIES")
+    if categories is None:
+        categories = section.get("categories")
     if categories:
         parts = [part.strip() for part in categories.strip().split(",") if part.strip()]
         if parts:

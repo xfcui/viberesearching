@@ -27,12 +27,14 @@ Single user-facing doc: `README.md`. No other project `.md` docs.
 
 1. Title + tagline
 2. Why VibeResearching? 🚀
-3. Pick a path — deep / batch / enrich (+ optional verify) as a decision guide
+3. Pick a path — comprehensive / single-topic / multi-angle / enrich
+   (+ optional verify) as a decision guide
 4. Quick Start (≤3 commands: `pip`, `cp .env.example .env`)
 5. First run — one concrete happy-path example (prefer deep or batch baseline)
-6. Usage Examples — progressive (async deep → batch retry → enrich → verify)
+6. Usage Examples — progressive (comprehensive → async single-topic →
+   multi-angle retry → enrich → verify)
 7. CLI Reference — one subsection per public runner below
-8. Input/Output — `work/deep/`, `work/batch/`, `work/enrich/` trees, ideas JSON, cost table
+8. Input/Output — `work/<topic-slug>/`, `work/deep/`, `work/batch/`, `work/enrich/` trees, ideas JSON, cost table
 9. Configuration — `.env` table, priority, categories, sample INI (placeholders only)
 10. License + sign-off
 
@@ -42,12 +44,17 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 
 | README section | Script |
 |----------------|--------|
-| `deep-research` | `.cursor/skills/deep-research/scripts/research_runner.py` |
-| `batch-research` | `.cursor/skills/batch-research/scripts/research_runner.py` |
-| `verify-references` | `.cursor/skills/verify-references/scripts/verify_references.py` |
+| `research-single-topic` | `.cursor/skills/research-single-topic/scripts/research_runner.py` |
+| `research-multi-angle` | `.cursor/skills/research-multi-angle/scripts/research_runner.py` |
+| `research-verify` | `.cursor/skills/research-verify/scripts/verify_references.py` |
 
 - Include every command + flag (defaults, required, choices)
-- `enrich-research` is an agent skill (no dedicated runner) — cover in Pick a path / Features; CLI examples reuse `batch-research` with `work/enrich/` and `--max-queries 0`
+- `research-comprehensive` is an agent skill (no dedicated runner) — cover its
+  chained fast → heavy → standard workflow using the single-topic and
+  multi-angle runners with one `work/<topic-slug>/` directory
+- `research-enrich` is an agent skill (no dedicated runner) — cover in
+  Pick a path / Features; CLI examples reuse `research-multi-angle` with
+  `work/enrich/` and `--max-queries 0`
 - Skill workflow detail lives in `.cursor/skills/*/SKILL.md` — README stays command-oriented
 - Never document `ship-it` or removed skills (e.g. convert-pdf)
 
@@ -55,23 +62,28 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 
 | Artifact | Path |
 |----------|------|
+| Full reports | `work/<topic-slug>/research_init.md`, `work/<topic-slug>/research_deep.md`, `work/<topic-slug>/researchNN_*.md` |
+| Full ideation / outcomes | `work/<topic-slug>/research_idea.md`, `work/<topic-slug>/ideas.json`, `work/<topic-slug>/manifest.json` |
 | Deep reports | `work/deep/research_init.md`, `work/deep/research_deep.md` |
-| Deep ideation | `work/deep/deep_research_idea.md` |
+| Deep ideation | `work/deep/research_idea.md` |
 | Batch reports | `work/batch/research_init.md`, `work/batch/researchNN_*.md` |
 | Batch queries / outcomes | `work/batch/ideas.json`, `work/batch/manifest.json` |
 | Temp state (all skills) | `{work dir}/tmp_state.json`, `tmp_checkpoint.json`, `tmp_checkpoint_response.json` — auto-removed on success |
 | OpenAlex cache | `{report dir}/openalex_cache.json` (per directory; `--cache PATH` to share one) |
 | Verify sidecars | `{report}.json` beside `{report}.md` (audit-only; never rewrite reports) |
-| Enrich I/O | inputs are user-supplied (any path/filename, `@` mention, or pasted text) → `work/enrich/` (`brief.md`, `ideas.json`, reports) |
+| Enrich I/O | any user-supplied content (notes, drafts, articles, reports, outlines, presentations, any path/filename, `@` mention, or pasted text) → `work/enrich/` (`brief.md`, `ideas.json`, reports) |
 
-Output examples must use these paths (`work/deep/...`, `work/batch/...`, `work/enrich/...`) — never invent alternate names. Do **not** prescribe input filenames for enrich; sources are whatever the user provides.
+Output examples must use these paths (`work/<topic-slug>/...`, `work/deep/...`, `work/batch/...`, `work/enrich/...`) — never invent alternate names. Do **not** prescribe input filenames for enrich; sources are whatever the user provides.
 
 ## Configuration rules
 
 - Source of truth: `.env.example` (never paste real keys)
 - Document priority: CLI flags > `VALYU_API_KEY` / `OPENALEX_API_KEY` > `[valyu]` / `[openalex]` INI
 - Categories list must match `.env.example` comments
-- Note: enrich/talk craft prefers unset/all sources over `categories = research`
+- Note: `research-comprehensive` pins `VALYU_CATEGORIES=research` on every
+  research submission
+- Note: content enrichment prefers unset/all sources over
+  `categories = research` unless the user explicitly wants one corpus
 
 ## Update when
 

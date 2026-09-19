@@ -1,17 +1,18 @@
 ---
-name: verify-references
+name: research-verify
 description: >-
   Verify and enrich research report citations via OpenAlex. Parses ## Sources
   from markdown reports, deduplicates lookups, writes audit-only {file}.json
-  sidecars, supports retry. Use after deep-research or batch-research when the
-  user wants reference verification or bibliographic enrichment.
+  sidecars, supports retry. Use after research-comprehensive,
+  research-single-topic, research-multi-angle, or research-enrich when
+  the user wants reference verification or bibliographic enrichment.
 ---
 
-# Verify References
+# Research Citation Verification
 
 Resolve citations in research reports against OpenAlex. Reads the `## Sources` (or `## References`) block from markdown (default `work/**/*.md`), writes audit-only `{file}.json` sidecars. **Never modifies reports.** Files without a `## Sources` block are skipped, so ideation notes and briefs get no sidecar; batch `manifest.json` source lists are not the verify input format.
 
-**Runner:** `.cursor/skills/verify-references/scripts/verify_references.py`
+**Runner:** `.cursor/skills/research-verify/scripts/verify_references.py`
 
 | Command | Purpose |
 |---|---|
@@ -38,35 +39,37 @@ Details: [reference.md](reference.md) (progress formats, cost model, sidecar sch
 
 ## Workflow
 
-Optional final phase after `deep-research` / `batch-research` / `enrich-research`. Run in the foreground and **relay per-reference progress** to the user.
+Optional final phase after `research-comprehensive`,
+`research-single-topic`, `research-multi-angle`, or `research-enrich`. Run in
+the foreground and **relay per-reference progress** to the user.
 
 ### 1. Verify
 
 Scope `--input` to the skill directory you just ran; the bare default sweeps every report under `work/`.
 
 ```bash
-python .cursor/skills/verify-references/scripts/verify_references.py verify \
+python .cursor/skills/research-verify/scripts/verify_references.py verify \
   --input "work/batch/*.md" --max-cost 1.0
 ```
 
 Single report:
 
 ```bash
-python .cursor/skills/verify-references/scripts/verify_references.py verify \
+python .cursor/skills/research-verify/scripts/verify_references.py verify \
   --input "work/deep/research_deep.md" --max-cost 1.0
 ```
 
 ### 2. Retry failures
 
 ```bash
-python .cursor/skills/verify-references/scripts/verify_references.py retry \
+python .cursor/skills/research-verify/scripts/verify_references.py retry \
   --input "work/batch/*.md"
 ```
 
 Or:
 
 ```bash
-python .cursor/skills/verify-references/scripts/verify_references.py retry \
+python .cursor/skills/research-verify/scripts/verify_references.py retry \
   --input "work/batch/research_init.md" --force-search
 ```
 

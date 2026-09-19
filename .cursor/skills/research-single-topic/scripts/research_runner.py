@@ -18,6 +18,7 @@ from research_scope import (  # noqa: E402
     TMP_CHECKPOINT_RESPONSE_NAME,
     anchor_query,
     append_state,
+    audit_enrichment,
     gate_scope,
     purge_tmp,
 )
@@ -84,7 +85,8 @@ def handle_research(args):
 
     if main_topic:
         gate_scope([{"query": query}], {"main_topic": main_topic},
-                   allow_drift=getattr(args, "allow_drift", False))
+                   allow_drift=getattr(args, "allow_drift", False),
+                   full_scope=True)
         if not getattr(args, "no_anchor", False):
             query = anchor_query(query, main_topic)
 
@@ -262,6 +264,73 @@ def handle_respond(args):
     checkpoint_path.unlink(missing_ok=True)
 
 
+def report_title(report_text: str) -> str:
+    """First H1 of a report, used as the topic when --main-topic is omitted."""
+    for line in report_text.splitlines():
+        if line.startswith("# "):
+            return line[2:].strip()
+    return ""
+
+
+def handle_enrich_check(args):
+    """Audit whether the heavy report enriched its baseline. Local, no API calls."""
+    baseline_path = Path(args.baseline)
+    deep_path = Path(args.deep)
+
+    for path in (baseline_path, deep_path):
+        if not path.exists():
+            print(f"Error: '{path}' does not exist.", file=sys.stderr)
+            sys.exit(1)
+
+    baseline_text = baseline_path.read_text(encoding="utf-8")
+    deep_text = deep_path.read_text(encoding="utf-8")
+    main_topic = args.main_topic or report_title(baseline_text)
+
+    result = audit_enrichment(baseline_text, deep_text, {"main_topic": main_topic})
+    print(f"Topic: {main_topic or '(unknown)'}")
+    print(f"Baseline facets: {result['baseline_total']}  |  Heavy sections: {result['deep_total']}")
+
+    if result["enriched"]:
+        print(f"\nEnriched ({len(result['enriched'])}):")
+        for heading, hits in result["enriched"]:
+            print(f"  {heading}")
+            for hit in hits:
+                print(f"    -> {hit}")
+
+    patterns = [p.lower() for p in (args.allow_drop or [])]
+    by_design, regressions = [], []
+    for heading in result["dropped"]:
+        target = by_design if any(p in heading.lower() for p in patterns) else regressions
+        target.append(heading)
+
+    if by_design:
+        print(f"\nDropped by design ({len(by_design)}) — outside the declared emphasis:")
+        for heading in by_design:
+            print(f"  {heading}")
+
+    if regressions:
+        print(f"\nNot carried over ({len(regressions)}) — regression, the heavy run lost these:")
+        for heading in regressions:
+            print(f"  {heading}")
+
+    off_topic = [h for h, on_topic in result["added"] if not on_topic]
+    on_topic = [h for h, on_topic in result["added"] if on_topic]
+
+    if on_topic:
+        print(f"\nNew in heavy, on topic ({len(on_topic)}):")
+        for heading in on_topic:
+            print(f"  {heading}")
+
+    if off_topic:
+        print(f"\nNew in heavy, off topic ({len(off_topic)}) — drift, no baseline home and no topic terminology:")
+        for heading in off_topic:
+            print(f"  {heading}")
+
+    if not regressions and not off_topic:
+        kept = " (ignoring facets dropped by design)" if by_design else ""
+        print(f"\nEnrichment audit passed: every baseline facet came back, nothing drifted{kept}.")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Valyu DeepResearch runner: create, poll, and manage single research tasks."
@@ -274,7 +343,7 @@ def main():
     parser_run.add_argument("--output", required=True, help="Path to save the markdown report")
     parser_run.add_argument(
         "--main-topic", default=None,
-        help="Parent topic to anchor the query to (omit for the baseline run)",
+        help="Baseline topic the query must cover in full (omit for the baseline run)",
     )
     parser_run.add_argument(
         "--mode", default="fast", choices=["fast", "standard", "heavy", "max"],
@@ -298,7 +367,7 @@ def main():
     )
     parser_run.add_argument(
         "--allow-drift", action="store_true",
-        help="Downgrade scope-check errors to warnings",
+        help="Downgrade scope-check errors to warnings (also permits a deliberately narrow query)",
     )
 
     # --- status: check task progress and optionally download ---
@@ -314,6 +383,28 @@ def main():
         help="JSON file containing the checkpoint response",
     )
 
+    # --- enrich-check: local audit of heavy vs baseline ---
+    parser_enrich = subparsers.add_parser(
+        "enrich-check",
+        help="Audit whether the heavy report enriched the baseline (no API calls)",
+    )
+    parser_enrich.add_argument(
+        "--baseline", default=str(DEFAULT_WORK_DIR / "research_init.md"),
+        help="Baseline report path (default: work/deep/research_init.md)",
+    )
+    parser_enrich.add_argument(
+        "--deep", default=str(DEFAULT_WORK_DIR / "research_deep.md"),
+        help="Heavy report path (default: work/deep/research_deep.md)",
+    )
+    parser_enrich.add_argument(
+        "--main-topic", default=None,
+        help="Topic to judge drift against (default: the baseline report's title)",
+    )
+    parser_enrich.add_argument(
+        "--allow-drop", action="append", default=None, metavar="SUBSTRING",
+        help="Baseline facet deliberately left out (case-insensitive substring; repeatable)",
+    )
+
     args = parser.parse_args()
 
     if args.command == "run":
@@ -322,6 +413,8 @@ def main():
         handle_status(args)
     elif args.command == "respond":
         handle_respond(args)
+    elif args.command == "enrich-check":
+        handle_enrich_check(args)
 
 
 if __name__ == "__main__":

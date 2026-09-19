@@ -5,6 +5,12 @@ Follow-up queries are submitted to Valyu as standalone strings, so without an
 explicit anchor a sub-query drifts into whatever topic it reads like on its own.
 This module keeps the parent topic attached to every follow-up and gates obvious
 drift locally, before any API spend.
+
+Two shapes share the gate. Multi-angle follow-ups are drill-downs into one
+facet, so partial overlap with the main topic is expected. A
+research-single-topic heavy query is a more precise restatement of the whole
+topic, so it is gated with
+``full_scope=True``, where thin coverage means the query narrowed instead.
 """
 import json
 import re
@@ -21,14 +27,16 @@ TMP_GLOB = "tmp_*.json"
 # these licenses unlimited breadth, which is how a scan-RNN baseline ended up
 # spawning vision, spiking-network, and genomics sub-reports.
 INELIGIBLE_ANCHOR_PATTERNS = (
-    r"^executive\s+summary$",
-    r"^conclusions?$",
+    r"^executive\s+summary",
+    r"^conclusions?\b",
     r"^sources?$",
     r"^references?$",
     r"applications?",
     r"future\s+directions?",
     r"recent\s+developments?",
     r"emerging",
+    r"data\s+gaps?",
+    r"research\s+priorit",
 )
 
 _STOPWORDS = frozenset("""
@@ -37,6 +45,8 @@ their this to via with within versus vs when where which why
 analysis approach approaches comparison evidence method methods overview review
 study studies survey technique techniques use using
 aware based driven general specific
+across advance advances consideration considerations current implication
+implications insight insights key landscape perspective perspectives
 """.split())
 
 # Words that describe almost any research subject. A query sharing only these
@@ -160,10 +170,14 @@ def load_scoped_queries(queries_file: Union[str, Path]) -> tuple[dict, list[dict
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def check_scope(entry: dict, meta: dict) -> list[tuple[str, str]]:
+def check_scope(entry: dict, meta: dict, full_scope: bool = False) -> list[tuple[str, str]]:
     """Return [(level, message)] scope problems for one query entry.
 
     Level is "error" (abort) or "warning" (proceed). Purely local: no API calls.
+
+    With full_scope, the query is expected to restate the whole main topic more
+    precisely rather than drill into one facet, so thin coverage of the topic's
+    distinctive terms is an error instead of the goal.
     """
     issues: list[tuple[str, str]] = []
     query = entry.get("query", "")
@@ -178,9 +192,17 @@ def check_scope(entry: dict, meta: dict) -> list[tuple[str, str]]:
             issues.append((
                 "error",
                 f"shares no distinctive terminology with the main topic ({main_topic or 'unset'}) "
-                "— looks like a different subject, not a drill-down",
+                "— looks like a different subject",
             ))
-        elif len(overlap) == 1 and len(core) >= 3:
+        elif full_scope and len(core) >= 3 and len(overlap) * 2 < len(core):
+            missing = sorted(core - overlap)
+            issues.append((
+                "error",
+                f"covers only {len(overlap)} of {len(core)} distinctive main-topic terms "
+                f"(missing: {', '.join(missing)}) — a refined restatement must keep the whole "
+                "topic, not narrow to one facet (that is research-multi-angle's job)",
+            ))
+        elif not full_scope and len(overlap) == 1 and len(core) >= 3:
             issues.append((
                 "warning",
                 f"only overlaps the main topic on '{sorted(overlap)[0]}' — confirm it is a drill-down",
@@ -211,7 +233,8 @@ def check_scope(entry: dict, meta: dict) -> list[tuple[str, str]]:
     return issues
 
 
-def gate_scope(entries: list[dict], meta: dict, allow_drift: bool = False) -> None:
+def gate_scope(entries: list[dict], meta: dict, allow_drift: bool = False,
+               full_scope: bool = False) -> None:
     """Report scope problems across all entries; abort on errors unless allowed."""
     if not meta.get("main_topic"):
         print("Warning: No 'main_topic' in queries file — submitting unanchored queries.", file=sys.stderr)
@@ -220,25 +243,88 @@ def gate_scope(entries: list[dict], meta: dict, allow_drift: bool = False) -> No
     errors = 0
     for index, entry in enumerate(entries, start=1):
         label = entry.get("id") or f"query {index}"
-        for level, message in check_scope(entry, meta):
+        for level, message in check_scope(entry, meta, full_scope=full_scope):
             if level == "error":
                 errors += 1
             print(f"  [{level}] {label}: {message}", file=sys.stderr)
 
     if not errors:
-        print(f"Scope check passed: {len(entries)} query(s) anchored to '{meta['main_topic']}'.")
+        shape = "covering the full scope of" if full_scope else "anchored to"
+        print(f"Scope check passed: {len(entries)} query(s) {shape} '{meta['main_topic']}'.")
         return
 
     if allow_drift:
         print(f"Warning: {errors} scope error(s) overridden by --allow-drift.", file=sys.stderr)
         return
 
+    fix = "Restate them over the full main topic" if full_scope else "Re-anchor them to the main topic"
     print(
         f"Error: {errors} query(s) failed the scope check. "
-        "Re-anchor them to the main topic, or pass --allow-drift to override. Aborting.",
+        f"{fix}, or pass --allow-drift to override. Aborting.",
         file=sys.stderr,
     )
     sys.exit(1)
+
+
+def report_headings(report_text: str, level: int = 2) -> list[str]:
+    """Substantive headings of a report at the given level, catch-alls removed."""
+    prefix = "#" * level + " "
+    headings = []
+    for line in report_text.splitlines():
+        if not line.startswith(prefix):
+            continue
+        heading = line[len(prefix):].strip()
+        if heading and not is_ineligible_anchor(heading):
+            headings.append(heading)
+    return headings
+
+
+def _heading_tokens(heading: str) -> set:
+    """Distinctive tokens of a heading, falling back to all tokens if needed."""
+    tokens = tokenize(normalize_heading(heading))
+    distinctive = tokens - _GENERIC_TOKENS
+    return distinctive or tokens
+
+
+def audit_enrichment(baseline_text: str, deep_text: str, meta: dict) -> dict:
+    """Compare a heavy report against the baseline it was meant to enrich.
+
+    A heavy run is supposed to return every baseline facet in stronger form, so
+    a baseline heading with no counterpart is a regression, not a saving.
+    Headings are matched on distinctive token overlap, so rewording still counts
+    as carried over. Local and free: no API calls.
+    """
+    baseline = report_headings(baseline_text)
+    deep = report_headings(deep_text)
+    core = scope_tokens(meta)
+
+    enriched: list[tuple[str, list[str]]] = []
+    dropped: list[str] = []
+    added: list[tuple[str, bool]] = []
+    matched: set[str] = set()
+
+    for heading in baseline:
+        tokens = _heading_tokens(heading)
+        hits = [d for d in deep if tokens & _heading_tokens(d)]
+        if hits:
+            enriched.append((heading, hits))
+            matched.update(hits)
+        else:
+            dropped.append(heading)
+
+    for heading in deep:
+        if heading in matched:
+            continue
+        on_topic = bool(core) and bool(_heading_tokens(heading) & core)
+        added.append((heading, on_topic))
+
+    return {
+        "enriched": enriched,
+        "dropped": dropped,
+        "added": added,
+        "baseline_total": len(baseline),
+        "deep_total": len(deep),
+    }
 
 
 def audit_report_scope(report_text: str, meta: dict) -> list[str]:

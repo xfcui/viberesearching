@@ -1,20 +1,23 @@
 ---
-name: batch-research
+name: research-multi-angle
 description: >-
   Multi-facet Valyu batch research: fast baseline, decompose into in-scope
   sub-ideas, then up to 12 parallel standard DeepResearch tasks with scope
   anchoring, async/retry, and cost guardrails. Use for batch research,
   exploring multiple angles of one topic, or parallel sub-queries. Not for talk
-  craft (enrich-research) or a single heavy deep-dive (deep-research).
+  enriching supplied content (research-enrich) or a single heavy deep-dive
+  (research-single-topic).
 ---
 
-# Batch Research
+# Multi-Angle Research
 
 **Shape: one fast baseline + up to 12 standard researches.** Outputs under `work/batch/`.
 
-**Not this skill:** talk storytelling/visuals → `enrich-research`. One hierarchical heavy dive → `deep-research`. Citation audit → `verify-references`. Quick cited lookup → the Valyu Answer/Search API directly.
+**Not this skill:** enrich user-supplied content → `research-enrich`. One
+hierarchical heavy dive → `research-single-topic`. Citation audit →
+`research-verify`. Quick cited lookup → the Valyu Answer/Search API directly.
 
-**Runner:** `.cursor/skills/batch-research/scripts/research_runner.py`
+**Runner:** `.cursor/skills/research-multi-angle/scripts/research_runner.py`
 
 | Command | Purpose |
 |---|---|
@@ -26,7 +29,8 @@ description: >-
 
 Baseline is `fast` (~$0.10); the fan-out is `standard` (~$0.50, ~10–20 min each). `heavy` / `max` stay available as CLI modes but are not this workflow — `12 × heavy` is $30.
 
-No HITL on this path—use `deep-research` for plan/source review. Shared Valyu rules: `.cursor/rules/valyu-api.mdc` (§10 covers scope anchoring).
+No HITL on this path—use `research-single-topic` for plan/source review.
+Shared Valyu rules: `.cursor/rules/valyu-api.mdc` (§10 covers scope anchoring).
 
 ---
 
@@ -37,7 +41,7 @@ No HITL on this path—use `deep-research` for plan/source review. Shared Valyu 
 - [ ] 2 Analyze → work/batch/ideas.json (≤12 anchored drill-downs)
 - [ ] 3 batch --mode standard --no-wait
 - [ ] 4 status → retry failures → summarize
-- [ ] 5 (optional) scope-check + verify-references
+- [ ] 5 (optional) scope-check + research-verify
 ```
 
 ### 1. Baseline
@@ -45,7 +49,7 @@ No HITL on this path—use `deep-research` for plan/source review. Shared Valyu 
 Focused semantic query; no `site:` / boolean operators. No anchor — the baseline *is* the topic.
 
 ```bash
-python .cursor/skills/batch-research/scripts/research_runner.py single \
+python .cursor/skills/research-multi-angle/scripts/research_runner.py single \
   --query "TOPIC" --output "work/batch/research_init.md" --mode fast
 ```
 
@@ -78,7 +82,7 @@ Plain `"queries": ["...", "..."]` still parses, but runs unanchored with a warni
 `standard` is the default mode and 12 the default cap; both abort before the API call if exceeded.
 
 ```bash
-python .cursor/skills/batch-research/scripts/research_runner.py batch \
+python .cursor/skills/research-multi-angle/scripts/research_runner.py batch \
   --queries-file "work/batch/ideas.json" --output-dir "work/batch" \
   --name "Batch Research: TOPIC" --mode standard --no-wait --max-cost 7.00
 ```
@@ -88,7 +92,7 @@ The runner attaches `main_topic` to every submitted query and rejects queries th
 Use `--no-wait`: 12 standard tasks take well over 10 minutes. Tell the user the Batch ID, then poll:
 
 ```bash
-python .cursor/skills/batch-research/scripts/research_runner.py status \
+python .cursor/skills/research-multi-angle/scripts/research_runner.py status \
   --batch-id "BATCH_ID" --output-dir "work/batch"
 ```
 
@@ -99,7 +103,7 @@ python .cursor/skills/batch-research/scripts/research_runner.py status \
 If `manifest.json` has failed/cancelled tasks (temp state is kept precisely for this):
 
 ```bash
-python .cursor/skills/batch-research/scripts/research_runner.py retry \
+python .cursor/skills/research-multi-angle/scripts/research_runner.py retry \
   --manifest "work/batch/manifest.json" --output-dir "work/batch" \
   --mode standard --max-cost 2.00
 ```
@@ -110,11 +114,11 @@ Retry reuses each task's stored anchor and merges successes back into the origin
 
 ```bash
 # Free local drift audit: report headings vs. their anchors
-python .cursor/skills/batch-research/scripts/research_runner.py scope-check \
+python .cursor/skills/research-multi-angle/scripts/research_runner.py scope-check \
   --manifest "work/batch/manifest.json" --queries-file "work/batch/ideas.json"
 
 # OpenAlex citation audit
-python .cursor/skills/verify-references/scripts/verify_references.py verify \
+python .cursor/skills/research-verify/scripts/verify_references.py verify \
   --input "work/batch/*.md" --max-cost 1.0
 ```
 

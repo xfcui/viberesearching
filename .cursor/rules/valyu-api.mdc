@@ -15,7 +15,7 @@ This rule enforces best practices for integrating and working with the Valyu API
 | Find sources across web/academic/news | Search API | Official `valyu` SDK — no runner in this repo |
 | Extract clean text from known URLs | Contents API | Official `valyu` SDK — no runner in this repo |
 | Quick cited answer / fact check | Answer API | Official `valyu` SDK — prefer over DeepResearch for lookups |
-| Comprehensive markdown research report | DeepResearch API | Project runners: `deep-research`, `batch-research`, `enrich-research` |
+| Comprehensive markdown research report | DeepResearch API | Project runners: `research-comprehensive`, `research-single-topic`, `research-multi-angle`, `research-enrich` |
 
 Do **not** spend DeepResearch budget on questions Answer or Search can resolve.
 
@@ -82,7 +82,8 @@ Valyu uses semantic search. Better queries → better results.
 
 1. **Be specific** — domain terminology, not vague nouns.
 2. **Be concise** — prefer under ~400 characters for search-like asks.
-3. **Be focused** — one topic per query; split multi-facet asks (use batch-research).
+3. **Be focused** — one topic per query; split multi-facet asks (use
+   `research-multi-angle`).
 4. **Add constraints** — timeframe, method, evidence type when relevant.
 5. **No search operators** — avoid `site:`, `OR`/`AND`, and quote-as-boolean tricks; scope with parameters or category instead.
 
@@ -104,7 +105,12 @@ Project DeepResearch runners pass optional search config from env:
 
 Allowed categories include: `research`, `healthcare`, `patents`, `markets`, `company`, `economic`, `predictions`, `legal`, `politics`, `cybersecurity`, `transportation`.
 
-For talk craft (`enrich-research`), usually **omit** `categories` (especially `research`) so storytelling/visual sources are not biased toward academic corpora.
+For content enrichment (`research-enrich`), usually **omit** `categories`
+(especially `research`) so the run can use the source types best suited to
+the supplied content. Same for any brief covering **industry** alongside
+academia — pipelines, products, and partnerships do not live in research
+corpora. An explicitly empty `VALYU_CATEGORIES=` clears the INI value for a
+single run.
 
 CLI `included_sources` / date filters are not exposed on runners yet; do not invent unsupported flags.
 
@@ -147,7 +153,10 @@ For tasks that take 10+ minutes (`heavy` or `max` modes, or batches with 5+ quer
 
 ## 8. Human-in-the-Loop (HITL) Checkpoints
 
-For high-stakes research, enable HITL checkpoints (`plan_review`, `source_review`) via the **deep-research** runner (`--hitl`). Batch path has no HITL—use deep-research for gated single dives.
+For high-stakes research, enable HITL checkpoints (`plan_review`,
+`source_review`) via the **research-single-topic** runner (`--hitl`).
+Multi-angle research has no HITL—use `research-single-topic` for gated single
+dives.
 
 - Write checkpoint data to `work/deep/tmp_checkpoint.json`.
 - Wait for a user response in `work/deep/tmp_checkpoint_response.json`.
@@ -161,7 +170,20 @@ For multi-query research, run tasks in parallel using the batch API. Maintain a 
 
 Follow-up queries reach Valyu as standalone strings. Without an anchor, a sub-query is researched as whatever topic it reads like on its own, so a batch drifts away from the baseline one query at a time. Every follow-up must therefore carry its parent topic.
 
-### Scope contract
+### Two shapes of second pass
+
+| Skill | Second pass is | Relation to the baseline topic | Gate |
+|---|---|---|---|
+| `research-multi-angle`, `research-enrich` | ≤12 drill-downs, one per facet | each query is a strict **subset** | anchored per query (below) |
+| `research-single-topic` | one heavy run, precisely specified | the query restates the **whole topic** | full-scope coverage |
+
+The anchor machinery below governs drill-downs. For
+`research-single-topic` there is no per-query anchor heading: the baseline's
+H2s become the coverage facets the single query must span, and the runner
+errors when the query covers less than half the main topic's distinctive
+terms — that means it narrowed to a facet instead of sharpening the topic.
+
+### Scope contract (drill-downs)
 
 The ideation artifact declares the scope once, and every query points back into it:
 
@@ -176,7 +198,11 @@ The ideation artifact declares the scope once, and every query points back into 
 }
 ```
 
-`anchor_headings` are the baseline report's H2s for deep/batch, or headings taken from the user's source content for enrich. Runners attach the parent topic to each submitted query automatically (`--no-anchor` opts out) and persist `main_topic` / `anchor` into `manifest.json` so retries and audits stay anchored.
+`anchor_headings` are the baseline report's H2s for multi-angle research, or
+headings and stable passage labels taken from the user's source content for
+enrichment. Runners attach the parent topic to each submitted query
+automatically (`--no-anchor` opts out) and persist `main_topic` / `anchor`
+into `manifest.json` so retries and audits stay anchored.
 
 ### Ineligible anchors
 
@@ -186,11 +212,16 @@ A heading that summarises or open-endedly extends the report cannot constrain an
 
 ### Three-test gate
 
-Apply to every follow-up query before submitting:
+Apply to every drill-down query before submitting:
 
 1. **Anchor test** — it resolves to a substantive anchor heading, not a catch-all.
 2. **Subject test** — the query's subject is still the main topic's subject. Under a scan-RNN baseline, "vision Mamba 2D spatial scanning" fails: the subject became vision models.
 3. **Transfer test** — if the query would read naturally in a report on a *different* main topic, it is drift.
+
+For a `research-single-topic` heavy query, swap the anchor test for a
+**breadth test** (spans every coverage facet, and nothing beyond the topic)
+and add a **boundary test** (the ideation note names the adjacent fields the
+run must not wander into). The subject test still applies.
 
 Sharing only generic vocabulary (`neural`, `network`, `model`, `learning`, `system`) is not a pass. The runners enforce this locally before any API spend and abort on failure; `--allow-drift` downgrades errors to warnings when a query is genuinely in scope but worded unusually.
 
