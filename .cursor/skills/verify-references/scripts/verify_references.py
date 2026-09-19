@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import configparser
 import difflib
 import glob
 import json
@@ -13,17 +12,23 @@ import random
 import re
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 import requests
 from dotenv import load_dotenv
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared"))
+from research_env import find_env_file, read_ini_section  # noqa: E402
+
 OPENALEX_BASE = "https://api.openalex.org"
-DEFAULT_CACHE_PATH = "output/openalex_cache.json"
-DEFAULT_INPUT_GLOB = "output/*.md"
+CACHE_FILE_NAME = "openalex_cache.json"
+CACHE_AUTO = "auto"
+CACHE_VERSION = 2
+CACHE_FLUSH_EVERY = 25
+DEFAULT_INPUT_GLOB = "work/**/*.md"
 SELECT_FIELDS = (
     "id,doi,title,display_name,publication_year,authorships,"
     "primary_location,cited_by_count,open_access"
@@ -34,16 +39,51 @@ SOURCE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s?#]+", re.IGNORECASE)
-PMID_RE = re.compile(r"(?:pubmed\.ncbi\.nlm\.nih\.gov/(?:\d+|PMC\d+)|/(\d{7,8})(?:/|$|\?))", re.IGNORECASE)
+PMID_RE = re.compile(r"pubmed\.ncbi\.nlm\.nih\.gov/(\d{1,8})(?:[/?#]|$)", re.IGNORECASE)
 PMCID_RE = re.compile(r"(?:/|pmc/)(PMC\d+)", re.IGNORECASE)
-ARXIV_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)", re.IGNORECASE)
+# New-style (2108.06036) and legacy (cs/0701001, math.GT/0309136) arXiv IDs;
+# any trailing version suffix is dropped so 2108.06036v2 dedups with 2108.06036.
+ARXIV_RE = re.compile(
+    r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}|[a-z-]+(?:\.[a-z]{2})?/\d{7})(?:v\d+)?",
+    re.IGNORECASE,
+)
 BIORXIV_RE = re.compile(r"(?:biorxiv|medrxiv|chemrxiv)\.org/content/10\.1101/[^\s?#]+", re.IGNORECASE)
+ARXIV_DOI_PREFIX = "10.48550/arxiv."
+
+TITLE_TAG_RE = re.compile(
+    r"^(?:\[\s*(?:arxiv:)?\d{4}\.\d{4,5}(?:v\d+)?\s*\]|\(pdf\))\s*",
+    re.IGNORECASE,
+)
+TITLE_SITE_SUFFIX_RE = re.compile(
+    r"\s+[-–—]\s+(?:pubmed(?:\s+central)?|pmc|sciencedirect|researchgate|google\s+scholar)\s*$",
+    re.IGNORECASE,
+)
+# Characters OpenAlex reads as filter syntax inside a search value.
+SEARCH_UNSAFE_RE = re.compile(r"[,|?*]")
+MAX_SEARCH_TITLE_CHARS = 200
+
 COST_SINGLETON = 0.0
 COST_LIST = 0.0001
+# Failures that count as "errored" in a summary, as opposed to a clean
+# not_found / ambiguous verdict from OpenAlex.
+ERROR_CODES = frozenset({"rate_limited", "budget_exceeded", "network_error", "bad_request", "skipped"})
+# Per-report fields, never stored in the shared cache.
+VOLATILE_FIELDS = frozenset({"index", "original_title", "original_url"})
 
 
-class RateLimitExhausted(Exception):
-    """Daily OpenAlex budget exhausted after retries."""
+class LookupAborted(Exception):
+    """A lookup could not complete. `kind` is the error code recorded on the record.
+
+    `rate_limited` and `budget_exceeded` halt the whole run; `bad_request` and
+    `network_error` only fail the reference at hand.
+    """
+
+    HALTING = frozenset({"rate_limited", "budget_exceeded"})
+
+    def __init__(self, kind: str, detail: str = ""):
+        super().__init__(f"{kind}: {detail}" if detail else kind)
+        self.kind = kind
+        self.detail = detail
 
 
 @dataclass
@@ -65,12 +105,14 @@ class RequestStats:
     cache_hits: int = 0
     memo_hits: int = 0
     estimated_cost_usd: float = 0.0
-    rate_limited: bool = False
+    halted: bool = False
+    halt_reason: Optional[str] = None
 
 
 @dataclass
 class VerifyConfig:
-    api_key: str
+    api_key: Optional[str] = None
+    mailto: Optional[str] = None
     rate: float = 5.0
     sim_threshold: float = 0.8
     max_cost: Optional[float] = None
@@ -80,53 +122,59 @@ class VerifyConfig:
     use_cache: bool = True
     refresh_cache: bool = False
     force_search: bool = False
-    cache_path: Path = field(default_factory=lambda: Path(DEFAULT_CACHE_PATH))
+    cache: str = CACHE_AUTO
 
 
-def find_env_file() -> Path:
-    current = Path(__file__).resolve().parent
-    for parent in [current] + list(current.parents):
-        env_file = parent / ".env"
-        if env_file.exists():
-            return env_file
-    return Path.cwd() / ".env"
+def write_json_atomic(path: Path, payload: Any) -> None:
+    """Write via a temp file so an interrupted run cannot truncate the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.tmp")
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp_path, path)
 
 
-def read_ini_section(env_path: Path, section_name: str) -> dict[str, str]:
-    if not env_path.exists():
-        return {}
-    try:
-        text = env_path.read_text(encoding="utf-8")
-        start = text.find(f"[{section_name}]")
-        if start == -1:
-            return {}
-        parser = configparser.ConfigParser()
-        parser.read_string(text[start:])
-        if not parser.has_section(section_name):
-            return {}
-        return {key: value for key, value in parser.items(section_name) if key != "DEFAULT"}
-    except Exception:
-        return {}
-
-
-def get_openalex_api_key() -> str:
+def load_openalex_auth() -> tuple[Optional[str], Optional[str]]:
+    """Return (api_key, mailto). Both are optional: OpenAlex serves anonymous
+    traffic, a `mailto` joins the polite pool, and a key raises the daily cap.
+    """
     env_path = find_env_file()
     load_dotenv(env_path)
     section = read_ini_section(env_path, "openalex")
-    api_key = os.getenv("OPENALEX_API_KEY") or section.get("api_key", "").strip()
-    if not api_key:
+    api_key = (os.getenv("OPENALEX_API_KEY") or section.get("api_key", "")).strip() or None
+    mailto = (os.getenv("OPENALEX_MAILTO") or section.get("mailto", "")).strip() or None
+    if not api_key and not mailto:
         print(
-            "Error: OPENALEX_API_KEY not found in environment or [openalex] section of .env.",
+            "Note: no OPENALEX_API_KEY or OPENALEX_MAILTO set — using the anonymous "
+            "pool, which is rate-limited more aggressively.",
             file=sys.stderr,
         )
-        sys.exit(1)
-    return api_key
+    return api_key, mailto
 
 
 def normalize_title(title: str) -> str:
     cleaned = re.sub(r"\s+", " ", title.lower().strip())
     cleaned = re.sub(r"[^\w\s]", "", cleaned)
     return cleaned
+
+
+def clean_search_title(title: str) -> str:
+    """Strip scraped site chrome and filter-breaking characters from a title.
+
+    Report titles arrive as search-result headlines: `[2512.04123] Real Title`,
+    `Real Title - PubMed`, `Journal | Free Full-Text | Real Title | HTML`.
+
+    OpenAlex rejects a `title.search` value with HTTP 400 when it contains a
+    comma (filter separator), a pipe (OR), or a `?`/`*` wildcard, so those
+    characters are removed rather than retried.
+    """
+    cleaned = re.sub(r"\s+", " ", (title or "").strip())
+    cleaned = TITLE_TAG_RE.sub("", cleaned)
+    if "|" in cleaned:
+        cleaned = max((segment.strip() for segment in cleaned.split("|")), key=len)
+    cleaned = TITLE_SITE_SUFFIX_RE.sub("", cleaned)
+    cleaned = SEARCH_UNSAFE_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip().lstrip("!-")
+    return cleaned[:MAX_SEARCH_TITLE_CHARS].strip()
 
 
 def normalize_doi(raw: str) -> str:
@@ -136,12 +184,37 @@ def normalize_doi(raw: str) -> str:
     return doi
 
 
+def arxiv_doi(arxiv_id: str) -> str:
+    """DataCite DOI minted for every arXiv submission."""
+    return f"{ARXIV_DOI_PREFIX}{arxiv_id.lower()}"
+
+
 def dedup_key(identifier: Optional[Identifier], title: str) -> str:
     if identifier:
         if identifier.type == "doi":
             return f"doi:{normalize_doi(identifier.value)}"
+        if identifier.type == "arxiv":
+            # Same key as the DataCite DOI, so both spellings of one preprint
+            # collapse into a single lookup.
+            return f"doi:{arxiv_doi(identifier.value)}"
         return f"{identifier.type}:{identifier.value.lower()}"
     return f"title:{normalize_title(title)}"
+
+
+def singleton_path(identifier: Identifier) -> Optional[str]:
+    """OpenAlex single-work path for an identifier, or None if it has no usable one.
+
+    PMCIDs are deliberately absent: OpenAlex indexes no `pmcid` for the PMC
+    records these reports cite, so the lookup only ever spends a round trip
+    before falling through to title search.
+    """
+    if identifier.type == "doi":
+        return f"/works/doi:{identifier.value}"
+    if identifier.type == "arxiv":
+        return f"/works/doi:{arxiv_doi(identifier.value)}"
+    if identifier.type == "pmid":
+        return f"/works/pmid:{identifier.value}"
+    return None
 
 
 def extract_identifier(title: str, url: str) -> Optional[Identifier]:
@@ -164,15 +237,8 @@ def extract_identifier(title: str, url: str) -> Optional[Identifier]:
         return Identifier("pmcid", pmc_match.group(1).upper())
 
     pmid_match = PMID_RE.search(url)
-    if pmid_match and pmid_match.group(1):
+    if pmid_match:
         return Identifier("pmid", pmid_match.group(1))
-
-    if "/pubmed.ncbi.nlm.nih.gov/" in url_lower:
-        tail = url.rstrip("/").split("/")[-1]
-        if tail.isdigit():
-            return Identifier("pmid", tail)
-        if tail.upper().startswith("PMC"):
-            return Identifier("pmcid", tail.upper())
 
     arxiv_match = ARXIV_RE.search(url)
     if arxiv_match:
@@ -213,7 +279,7 @@ def parse_sources_block(text: str) -> list[ParsedReference]:
 
 
 def expand_input_paths(pattern: str) -> list[Path]:
-    matches = sorted(Path(p) for p in glob.glob(pattern))
+    matches = sorted(Path(p) for p in glob.glob(pattern, recursive=True))
     if not matches:
         candidate = Path(pattern)
         if candidate.is_file():
@@ -244,8 +310,9 @@ class OpenAlexClient:
     def _check_cost(self, additional_cost: float) -> None:
         projected = self.stats.estimated_cost_usd + additional_cost
         if self.config.max_cost is not None and projected > self.config.max_cost:
-            raise RateLimitExhausted(
-                f"Estimated OpenAlex cost ${projected:.4f} exceeds --max-cost ${self.config.max_cost:.4f}"
+            raise LookupAborted(
+                "budget_exceeded",
+                f"estimated ${projected:.4f} exceeds --max-cost ${self.config.max_cost:.4f}",
             )
 
     def _request_with_retry(self, url: str, params: dict[str, Any], cost: float) -> Optional[dict[str, Any]]:
@@ -260,33 +327,37 @@ class OpenAlexClient:
             except requests.RequestException as exc:
                 last_error = str(exc)
                 if attempt >= self.config.retries:
-                    raise RateLimitExhausted(f"network_error: {last_error}") from exc
+                    raise LookupAborted("network_error", last_error) from exc
                 self._sleep_backoff(attempt, None)
                 continue
 
             if response.status_code == 404:
                 return None
 
-            if response.status_code == 429 or response.status_code >= 500:
+            if response.status_code == 429:
+                last_error = "HTTP 429"
+                if attempt >= self.config.retries:
+                    raise LookupAborted("rate_limited", last_error)
+                self._sleep_backoff(attempt, response.headers.get("Retry-After"))
+                continue
+
+            if response.status_code >= 500:
                 last_error = f"HTTP {response.status_code}"
                 if attempt >= self.config.retries:
-                    raise RateLimitExhausted(f"rate_limited: {last_error}")
-                retry_after = response.headers.get("Retry-After")
-                self._sleep_backoff(attempt, retry_after)
+                    raise LookupAborted("network_error", last_error)
+                self._sleep_backoff(attempt, response.headers.get("Retry-After"))
                 continue
 
             if not response.ok:
-                last_error = f"HTTP {response.status_code}: {response.text[:200]}"
-                if attempt >= self.config.retries:
-                    raise RateLimitExhausted(f"network_error: {last_error}")
-                self._sleep_backoff(attempt, None)
-                continue
+                # Any other 4xx is a rejected request, not a transient fault;
+                # replaying it just burns the backoff schedule.
+                raise LookupAborted("bad_request", f"HTTP {response.status_code}: {response.text[:200]}")
 
             self.stats.live_calls += 1
             self.stats.estimated_cost_usd += cost
             return response.json()
 
-        raise RateLimitExhausted(last_error or "unknown_error")
+        raise LookupAborted("network_error", last_error or "unknown error")
 
     def _sleep_backoff(self, attempt: int, retry_after: Optional[str]) -> None:
         if retry_after:
@@ -300,18 +371,16 @@ class OpenAlexClient:
         time.sleep(delay)
 
     def _base_params(self) -> dict[str, str]:
-        return {"api_key": self.config.api_key, "select": SELECT_FIELDS}
+        params = {"select": SELECT_FIELDS}
+        if self.config.api_key:
+            params["api_key"] = self.config.api_key
+        elif self.config.mailto:
+            params["mailto"] = self.config.mailto
+        return params
 
     def lookup_singleton(self, identifier: Identifier) -> tuple[Optional[dict[str, Any]], str]:
-        if identifier.type == "doi":
-            path = f"/works/doi:{identifier.value}"
-        elif identifier.type == "pmid":
-            path = f"/works/pmid:{identifier.value}"
-        elif identifier.type == "pmcid":
-            path = f"/works/pmcid:{identifier.value}"
-        elif identifier.type == "arxiv":
-            path = f"/works/https://arxiv.org/abs/{identifier.value}"
-        else:
+        path = singleton_path(identifier)
+        if path is None:
             return None, "unsupported_identifier"
 
         url = f"{OPENALEX_BASE}{path}"
@@ -321,8 +390,12 @@ class OpenAlexClient:
         return result, "singleton"
 
     def search_by_title(self, title: str) -> tuple[Optional[dict[str, Any]], float, str]:
+        query = clean_search_title(title)
+        if not query:
+            return None, 0.0, "not_found"
+
         params = self._base_params()
-        params["filter"] = f"title.search:{title}"
+        params["filter"] = f"title.search:{query}"
         params["per-page"] = "5"
         url = f"{OPENALEX_BASE}/works"
         payload = self._request_with_retry(url, params, COST_LIST)
@@ -332,22 +405,30 @@ class OpenAlexClient:
         if not results:
             return None, 0.0, "not_found"
 
+        # Score against the original title: the cleaned form is only a query.
         normalized = normalize_title(title)
-        best = max(
-            results,
-            key=lambda item: difflib.SequenceMatcher(
-                None, normalized, normalize_title(item.get("display_name") or item.get("title") or "")
-            ).ratio(),
-        )
-        similarity = difflib.SequenceMatcher(
-            None,
-            normalized,
-            normalize_title(best.get("display_name") or best.get("title") or ""),
-        ).ratio()
+        scored = [
+            (
+                difflib.SequenceMatcher(
+                    None,
+                    normalized,
+                    normalize_title(item.get("display_name") or item.get("title") or ""),
+                ).ratio(),
+                item,
+            )
+            for item in results
+        ]
+        similarity, best = max(scored, key=lambda pair: pair[0])
         return best, similarity, "title_search"
 
 
 class ReferenceCache:
+    """Verified OpenAlex lookups, reused across runs.
+
+    Only positives live here, so an unresolved reference is always re-queried
+    by the next `verify` or `retry`.
+    """
+
     def __init__(self, path: Path, enabled: bool = True, refresh: bool = False):
         self.path = path
         self.enabled = enabled
@@ -355,10 +436,25 @@ class ReferenceCache:
         self.data: dict[str, Any] = {}
         self.dirty = False
         if enabled and not refresh and path.exists():
-            try:
-                self.data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
-                self.data = {}
+            self._load()
+
+    def _load(self) -> None:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        entries = raw.get("entries") if raw.get("version") else raw
+        if not isinstance(entries, dict):
+            return
+        # Drop negatives left behind by caches written before positives-only.
+        self.data = {
+            key: value
+            for key, value in entries.items()
+            if isinstance(value, dict) and value.get("verified")
+        }
+        self.dirty = len(self.data) != len(entries) or not raw.get("version")
 
     def get(self, key: str) -> Optional[dict[str, Any]]:
         if not self.enabled or self.refresh:
@@ -374,8 +470,35 @@ class ReferenceCache:
     def save(self) -> None:
         if not self.enabled or not self.dirty:
             return
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=2, ensure_ascii=False), encoding="utf-8")
+        write_json_atomic(self.path, {"version": CACHE_VERSION, "entries": self.data})
+        self.dirty = False
+
+
+class CacheStore:
+    """Resolves which cache file backs a given report.
+
+    Default (`auto`) keeps one cache beside each report directory, so a project
+    under `work/<topic>/<angle>/` carries its own; an explicit `--cache` path
+    makes every report share a single file.
+    """
+
+    def __init__(self, cache_arg: str, enabled: bool = True, refresh: bool = False):
+        self.explicit_path = None if cache_arg == CACHE_AUTO else Path(cache_arg)
+        self.enabled = enabled
+        self.refresh = refresh
+        self._caches: dict[Path, ReferenceCache] = {}
+
+    def for_report(self, report_path: Path) -> ReferenceCache:
+        path = self.explicit_path or (report_path.parent / CACHE_FILE_NAME)
+        cache = self._caches.get(path)
+        if cache is None:
+            cache = ReferenceCache(path, enabled=self.enabled, refresh=self.refresh)
+            self._caches[path] = cache
+        return cache
+
+    def save_all(self) -> None:
+        for cache in self._caches.values():
+            cache.save()
 
 
 def extract_authors(work: dict[str, Any]) -> list[str]:
@@ -419,45 +542,27 @@ def resolve_reference(
 ) -> dict[str, Any]:
     identifier = extract_identifier(ref.title, ref.url)
     key = dedup_key(identifier, ref.title)
-
-    if key in memo:
-        client.stats.memo_hits += 1
-        cached_record = memo[key].copy()
-        cached_record.update(
-            {
-                "index": ref.index,
-                "original_title": ref.title,
-                "original_url": ref.url,
-                "identifier": {"type": identifier.type, "value": identifier.value} if identifier else None,
-                "dedup_key": key,
-                "cache_hit": True,
-            }
-        )
-        return cached_record
-
-    cached = cache.get(key)
-    if cached:
-        client.stats.cache_hits += 1
-        record = cached.copy()
-        record.update(
-            {
-                "index": ref.index,
-                "original_title": ref.title,
-                "original_url": ref.url,
-                "identifier": {"type": identifier.type, "value": identifier.value} if identifier else None,
-                "dedup_key": key,
-                "cache_hit": True,
-            }
-        )
-        memo[key] = record
-        return record
-
-    record: dict[str, Any] = {
+    stamp = {
         "index": ref.index,
         "original_title": ref.title,
         "original_url": ref.url,
         "identifier": {"type": identifier.type, "value": identifier.value} if identifier else None,
         "dedup_key": key,
+    }
+
+    if key in memo:
+        client.stats.memo_hits += 1
+        return {**memo[key], **stamp, "cache_hit": True}
+
+    cached = cache.get(key)
+    if cached:
+        client.stats.cache_hits += 1
+        record = {**cached, **stamp, "cache_hit": True}
+        memo[key] = record
+        return record
+
+    record: dict[str, Any] = {
+        **stamp,
         "verified": False,
         "error": None,
         "attempts": 1,
@@ -467,78 +572,120 @@ def resolve_reference(
         "cache_hit": False,
     }
 
-    try:
-        work: Optional[dict[str, Any]] = None
-        match_method = None
-        similarity: Optional[float] = None
+    work: Optional[dict[str, Any]] = None
+    match_method: Optional[str] = None
+    similarity: Optional[float] = None
 
+    try:
         if identifier and not force_search:
             work, match_method = client.lookup_singleton(identifier)
 
         if work is None:
             candidate, similarity, match_method = client.search_by_title(ref.title)
             record["title_similarity"] = round(similarity, 4)
+            record["match_method"] = match_method
             if candidate and similarity >= sim_threshold:
                 work = candidate
-            elif candidate:
-                record["error"] = "ambiguous"
-                record["match_method"] = match_method
-                memo[key] = record
-                return record
             else:
-                record["error"] = "not_found"
-                record["match_method"] = match_method
+                record["error"] = "ambiguous" if candidate else "not_found"
                 memo[key] = record
-                cache.set(key, {k: v for k, v in record.items() if k not in {"index", "original_title", "original_url"}})
                 return record
 
-        if work:
-            record["openalex"] = build_openalex_payload(work)
-            record["verified"] = True
-            record["match_method"] = match_method
-            if similarity is not None:
-                record["title_similarity"] = round(similarity, 4)
-            elif identifier:
-                canonical = work.get("display_name") or work.get("title") or ""
-                record["title_similarity"] = round(
-                    difflib.SequenceMatcher(None, normalize_title(ref.title), normalize_title(canonical)).ratio(),
-                    4,
-                )
+        record["openalex"] = build_openalex_payload(work)
+        record["verified"] = True
+        record["match_method"] = match_method
+        if similarity is None:
+            canonical = work.get("display_name") or work.get("title") or ""
+            similarity = difflib.SequenceMatcher(
+                None, normalize_title(ref.title), normalize_title(canonical)
+            ).ratio()
+        record["title_similarity"] = round(similarity, 4)
 
-    except RateLimitExhausted as exc:
-        message = str(exc)
-        if message.startswith("rate_limited"):
-            client.stats.rate_limited = True
-            record["error"] = "rate_limited"
-        elif message.startswith("network_error"):
-            record["error"] = "network_error"
-            # Fall back to title search once if singleton lookup failed transiently.
-            if identifier and not force_search and work is None:
-                try:
-                    candidate, similarity, match_method = client.search_by_title(ref.title)
-                    record["title_similarity"] = round(similarity, 4)
-                    if candidate and similarity >= sim_threshold:
-                        record["openalex"] = build_openalex_payload(candidate)
-                        record["verified"] = True
-                        record["match_method"] = match_method
-                        record["error"] = None
-                except RateLimitExhausted as fallback_exc:
-                    if str(fallback_exc).startswith("rate_limited"):
-                        client.stats.rate_limited = True
-                        record["error"] = "rate_limited"
-                    else:
-                        record["error"] = "network_error"
-        else:
-            client.stats.rate_limited = True
-            record["error"] = "rate_limited"
+    except LookupAborted as exc:
+        record["error"] = exc.kind
         record["attempts"] = client.config.retries + 1
+        if exc.kind in LookupAborted.HALTING:
+            client.stats.halted = True
+            client.stats.halt_reason = exc.kind
+        elif exc.kind == "network_error" and identifier and not force_search and work is None:
+            # A singleton lookup can fail transiently; title search is a second route.
+            try:
+                candidate, similarity, match_method = client.search_by_title(ref.title)
+                record["title_similarity"] = round(similarity, 4)
+                if candidate and similarity >= sim_threshold:
+                    record["openalex"] = build_openalex_payload(candidate)
+                    record["verified"] = True
+                    record["match_method"] = match_method
+                    record["error"] = None
+            except LookupAborted as fallback_exc:
+                record["error"] = fallback_exc.kind
+                if fallback_exc.kind in LookupAborted.HALTING:
+                    client.stats.halted = True
+                    client.stats.halt_reason = fallback_exc.kind
 
     memo[key] = record
-    cache.set(
-        key,
-        {k: v for k, v in record.items() if k not in {"index", "original_title", "original_url"}},
-    )
+    if record["verified"]:
+        # Negative results are never persisted: caching them would make `retry`
+        # a no-op, since every unresolved record would come back as a cache hit.
+        cache.set(key, {k: v for k, v in record.items() if k not in VOLATILE_FIELDS})
     return record
+
+
+def snapshot_stats(stats: RequestStats) -> RequestStats:
+    return RequestStats(
+        live_calls=stats.live_calls,
+        cache_hits=stats.cache_hits,
+        memo_hits=stats.memo_hits,
+        estimated_cost_usd=stats.estimated_cost_usd,
+    )
+
+
+def stats_delta(stats: RequestStats, before: RequestStats) -> RequestStats:
+    """Work done since `before`, so each sidecar reports its own counters."""
+    return RequestStats(
+        live_calls=stats.live_calls - before.live_calls,
+        cache_hits=stats.cache_hits - before.cache_hits,
+        memo_hits=stats.memo_hits - before.memo_hits,
+        estimated_cost_usd=stats.estimated_cost_usd - before.estimated_cost_usd,
+        halted=stats.halted,
+        halt_reason=stats.halt_reason,
+    )
+
+
+def carry_stats(prior_summary: dict[str, Any], delta: RequestStats) -> RequestStats:
+    """Add this run's work to the counters a sidecar already recorded."""
+
+    def prior(field_name: str, default: float = 0.0) -> float:
+        value = prior_summary.get(field_name, default)
+        return value if isinstance(value, (int, float)) else default
+
+    return RequestStats(
+        live_calls=int(prior("live_calls")) + delta.live_calls,
+        cache_hits=int(prior("cache_hits")) + delta.cache_hits,
+        memo_hits=int(prior("memo_hits")) + delta.memo_hits,
+        estimated_cost_usd=prior("estimated_openalex_cost_usd") + delta.estimated_cost_usd,
+        halted=delta.halted,
+        halt_reason=delta.halt_reason,
+    )
+
+
+def skipped_record(ref: ParsedReference) -> dict[str, Any]:
+    """Placeholder for a reference the run never reached after halting."""
+    identifier = extract_identifier(ref.title, ref.url)
+    return {
+        "index": ref.index,
+        "original_title": ref.title,
+        "original_url": ref.url,
+        "identifier": {"type": identifier.type, "value": identifier.value} if identifier else None,
+        "dedup_key": dedup_key(identifier, ref.title),
+        "verified": False,
+        "error": "skipped",
+        "attempts": 0,
+        "match_method": None,
+        "title_similarity": None,
+        "openalex": None,
+        "cache_hit": False,
+    }
 
 
 def truncate_title(title: str, max_len: int = 55) -> str:
@@ -549,9 +696,9 @@ def truncate_title(title: str, max_len: int = 55) -> str:
 
 
 def format_record_status(record: dict[str, Any]) -> str:
-    if record.get("cache_hit"):
-        return "cache hit"
     if record.get("verified"):
+        if record.get("cache_hit"):
+            return "verified (cached)"
         method = record.get("match_method") or "verified"
         similarity = record.get("title_similarity")
         if similarity is not None and method == "title_search":
@@ -582,9 +729,10 @@ def print_ref_progress(
 def summarize_records(report_path: Path, records: list[dict[str, Any]], stats: RequestStats) -> dict[str, Any]:
     verified = sum(1 for r in records if r.get("verified"))
     unverified = sum(1 for r in records if not r.get("verified") and not r.get("error"))
-    errored = sum(1 for r in records if r.get("error") in {"rate_limited", "network_error"})
+    errored = sum(1 for r in records if r.get("error") in ERROR_CODES)
     ambiguous = sum(1 for r in records if r.get("error") == "ambiguous")
     not_found = sum(1 for r in records if r.get("error") == "not_found")
+    skipped = sum(1 for r in records if r.get("error") == "skipped")
 
     return {
         "report": str(report_path),
@@ -596,6 +744,7 @@ def summarize_records(report_path: Path, records: list[dict[str, Any]], stats: R
             "errored": errored,
             "ambiguous": ambiguous,
             "not_found": not_found,
+            "skipped": skipped,
             "live_calls": stats.live_calls,
             "cache_hits": stats.cache_hits,
             "memo_hits": stats.memo_hits,
@@ -613,65 +762,38 @@ def verify_report(
     sim_threshold: float,
     force_search: bool = False,
     *,
+    refs: Optional[list[ParsedReference]] = None,
     show_progress: bool = True,
 ) -> dict[str, Any]:
-    text = report_path.read_text(encoding="utf-8")
-    refs = parse_sources_block(text)
+    refs = refs if refs is not None else parse_sources_block(report_path.read_text(encoding="utf-8"))
     records: list[dict[str, Any]] = []
-    stats_before = RequestStats(
-        live_calls=client.stats.live_calls,
-        cache_hits=client.stats.cache_hits,
-        memo_hits=client.stats.memo_hits,
-        estimated_cost_usd=client.stats.estimated_cost_usd,
-        rate_limited=client.stats.rate_limited,
-    )
+    stats_before = snapshot_stats(client.stats)
+    flushed_at = client.stats.live_calls
 
     for idx, ref in enumerate(refs, start=1):
-        if client.stats.rate_limited:
-            identifier = extract_identifier(ref.title, ref.url)
-            key = dedup_key(identifier, ref.title)
-            record = {
-                "index": ref.index,
-                "original_title": ref.title,
-                "original_url": ref.url,
-                "identifier": {"type": identifier.type, "value": identifier.value} if identifier else None,
-                "dedup_key": key,
-                "verified": False,
-                "error": "rate_limited",
-                "attempts": client.config.retries + 1,
-                "match_method": None,
-                "title_similarity": None,
-                "openalex": None,
-                "cache_hit": False,
-            }
-            records.append(record)
-            if show_progress:
-                print_ref_progress(idx, len(refs), ref, record)
-            continue
-
-        record = resolve_reference(client, cache, memo, ref, sim_threshold, force_search=force_search)
+        if client.stats.halted:
+            record = skipped_record(ref)
+        else:
+            record = resolve_reference(client, cache, memo, ref, sim_threshold, force_search=force_search)
         records.append(record)
         if show_progress:
             print_ref_progress(idx, len(refs), ref, record)
+        if client.stats.live_calls - flushed_at >= CACHE_FLUSH_EVERY:
+            cache.save()
+            flushed_at = client.stats.live_calls
 
-    report_stats = RequestStats(
-        live_calls=client.stats.live_calls - stats_before.live_calls,
-        cache_hits=client.stats.cache_hits - stats_before.cache_hits,
-        memo_hits=client.stats.memo_hits - stats_before.memo_hits,
-        estimated_cost_usd=client.stats.estimated_cost_usd - stats_before.estimated_cost_usd,
-        rate_limited=client.stats.rate_limited,
-    )
-    return summarize_records(report_path, records, report_stats)
+    return summarize_records(report_path, records, stats_delta(client.stats, stats_before))
 
 
 def write_refs_json(payload: dict[str, Any], output_path: Path) -> None:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_json_atomic(output_path, payload)
 
 
-def handle_verify(args: argparse.Namespace) -> None:
-    config = VerifyConfig(
-        api_key=get_openalex_api_key(),
+def build_config(args: argparse.Namespace) -> VerifyConfig:
+    api_key, mailto = load_openalex_auth()
+    return VerifyConfig(
+        api_key=api_key,
+        mailto=mailto,
         rate=args.rate,
         sim_threshold=args.sim_threshold,
         max_cost=args.max_cost,
@@ -680,36 +802,53 @@ def handle_verify(args: argparse.Namespace) -> None:
         backoff_cap=args.backoff_cap,
         use_cache=not args.no_cache,
         refresh_cache=args.refresh_cache,
-        cache_path=Path(args.cache),
+        force_search=getattr(args, "force_search", False),
+        cache=args.cache,
     )
+
+
+def report_halt_reason(client: OpenAlexClient) -> None:
+    if not client.stats.halted:
+        return
+    reason = client.stats.halt_reason or "rate_limited"
+    detail = (
+        "estimated cost hit --max-cost"
+        if reason == "budget_exceeded"
+        else "OpenAlex rate limit reached"
+    )
+    print(f"    Stopped early: {detail}. Re-run 'retry' to finish.", file=sys.stderr)
+
+
+def handle_verify(args: argparse.Namespace) -> None:
+    config = build_config(args)
     client = OpenAlexClient(config)
-    cache = ReferenceCache(config.cache_path, enabled=config.use_cache, refresh=config.refresh_cache)
+    caches = CacheStore(config.cache, enabled=config.use_cache, refresh=config.refresh_cache)
     memo: dict[str, dict[str, Any]] = {}
 
-    input_pattern = args.input or DEFAULT_INPUT_GLOB
-    report_paths = expand_input_paths(input_pattern)
+    report_paths = expand_input_paths(args.input or DEFAULT_INPUT_GLOB)
     if not report_paths:
         print("No report files to verify.", file=sys.stderr)
         sys.exit(1)
 
-    total_refs = 0
-    for report_path in report_paths:
-        refs = parse_sources_block(report_path.read_text(encoding="utf-8"))
-        total_refs += len(refs)
+    # Parse once; reports without a Sources block are not verification targets.
+    parsed = [(path, parse_sources_block(path.read_text(encoding="utf-8"))) for path in report_paths]
+    targets = [(path, refs) for path, refs in parsed if refs]
+    without_sources = len(parsed) - len(targets)
+    total_refs = sum(len(refs) for _, refs in targets)
 
-    print(
-        f"Verifying references in {len(report_paths)} report(s) "
-        f"({total_refs} reference(s) total)..."
-    )
+    if not targets:
+        print(f"No '## Sources' block found in {len(parsed)} matched file(s). Nothing to verify.", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Verifying references in {len(targets)} report(s) ({total_refs} reference(s) total)...")
+    if without_sources:
+        print(f"  Skipped {without_sources} file(s) without a '## Sources' block.")
     total_verified = 0
 
-    for report_idx, report_path in enumerate(report_paths, start=1):
-        refs = parse_sources_block(report_path.read_text(encoding="utf-8"))
-        print(
-            f"\n  Report {report_idx}/{len(report_paths)}: {report_path} "
-            f"({len(refs)} reference(s))"
-        )
-        payload = verify_report(report_path, client, cache, memo, config.sim_threshold)
+    for report_idx, (report_path, refs) in enumerate(targets, start=1):
+        print(f"\n  Report {report_idx}/{len(targets)}: {report_path} ({len(refs)} reference(s))")
+        cache = caches.for_report(report_path)
+        payload = verify_report(report_path, client, cache, memo, config.sim_threshold, refs=refs)
         output_path = refs_json_path(report_path)
         write_refs_json(payload, output_path)
         summary = payload["summary"]
@@ -719,40 +858,27 @@ def handle_verify(args: argparse.Namespace) -> None:
             f"ambiguous={summary['ambiguous']} not_found={summary['not_found']} "
             f"errored={summary['errored']} -> {output_path.name}"
         )
-        if client.stats.rate_limited:
-            print("    Stopped early due to rate limit / max cost.", file=sys.stderr)
+        if client.stats.halted:
+            report_halt_reason(client)
             break
 
-    cache.save()
+    caches.save_all()
     print(
-        f"\nDone. {total_verified}/{total_refs} references verified across {len(report_paths)} report(s). "
+        f"\nDone. {total_verified}/{total_refs} references verified across {len(targets)} report(s). "
         f"live_calls={client.stats.live_calls} cache_hits={client.stats.cache_hits} "
         f"memo_hits={client.stats.memo_hits} est_cost=${client.stats.estimated_cost_usd:.4f}"
     )
 
 
 def should_retry_record(record: dict[str, Any]) -> bool:
-    if record.get("verified"):
-        return False
-    return record.get("error") in {None, "rate_limited", "network_error", "ambiguous", "not_found"}
+    """Every unresolved record is a retry candidate, whatever failed last time."""
+    return not record.get("verified")
 
 
 def handle_retry(args: argparse.Namespace) -> None:
-    config = VerifyConfig(
-        api_key=get_openalex_api_key(),
-        rate=args.rate,
-        sim_threshold=args.sim_threshold,
-        max_cost=args.max_cost,
-        retries=args.retries,
-        backoff_base=args.backoff_base,
-        backoff_cap=args.backoff_cap,
-        use_cache=not args.no_cache,
-        refresh_cache=args.refresh_cache,
-        force_search=args.force_search,
-        cache_path=Path(args.cache),
-    )
+    config = build_config(args)
     client = OpenAlexClient(config)
-    cache = ReferenceCache(config.cache_path, enabled=config.use_cache, refresh=config.refresh_cache)
+    caches = CacheStore(config.cache, enabled=config.use_cache, refresh=config.refresh_cache)
     memo: dict[str, dict[str, Any]] = {}
 
     refs_paths: list[Path] = []
@@ -794,6 +920,9 @@ def handle_retry(args: argparse.Namespace) -> None:
             continue
 
         records = payload.get("references") or []
+        prior_summary = payload.get("summary") or {}
+        cache = caches.for_report(refs_path)
+        stats_before = snapshot_stats(client.stats)
         updated = False
         recovered_here = 0
         retried_here = 0
@@ -803,7 +932,7 @@ def handle_retry(args: argparse.Namespace) -> None:
 
         for attempt_idx, idx in enumerate(retry_targets, start=1):
             record = records[idx]
-            if client.stats.rate_limited:
+            if client.stats.halted:
                 break
 
             ref = ParsedReference(
@@ -830,8 +959,11 @@ def handle_retry(args: argparse.Namespace) -> None:
             print_ref_progress(attempt_idx, len(retry_targets), ref, refreshed, status=status)
 
         if updated:
-            report_path = Path(payload.get("report") or refs_path.with_suffix("").with_suffix(".md"))
-            payload = summarize_records(report_path, records, client.stats)
+            report_path = Path(payload.get("report") or refs_path.with_suffix(".md"))
+            # Counters accumulate onto this sidecar's own history rather than
+            # the run-wide totals, which cover every sidecar touched so far.
+            carried = carry_stats(prior_summary, stats_delta(client.stats, stats_before))
+            payload = summarize_records(report_path, records, carried)
             write_refs_json(payload, refs_path)
             print(
                 f"  {refs_path.name}: retried={retried_here} recovered={recovered_here} "
@@ -840,7 +972,11 @@ def handle_retry(args: argparse.Namespace) -> None:
             total_recovered += recovered_here
             total_retried += retried_here
 
-    cache.save()
+        if client.stats.halted:
+            report_halt_reason(client)
+            break
+
+    caches.save_all()
     print(
         f"\nRetry done. recovered={total_recovered} retried={total_retried} "
         f"live_calls={client.stats.live_calls} est_cost=${client.stats.estimated_cost_usd:.4f}"
@@ -861,7 +997,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--retries", type=int, default=4, help="Per-request retry attempts (default: 4)")
     common.add_argument("--backoff-base", type=float, default=1.0, help="Retry backoff base seconds (default: 1.0)")
     common.add_argument("--backoff-cap", type=float, default=30.0, help="Retry backoff cap seconds (default: 30)")
-    common.add_argument("--cache", default=DEFAULT_CACHE_PATH, help=f"Persistent cache path (default: {DEFAULT_CACHE_PATH})")
+    common.add_argument(
+        "--cache", default=CACHE_AUTO,
+        help=f"Cache path, or '{CACHE_AUTO}' for one {CACHE_FILE_NAME} per report directory (default: {CACHE_AUTO})",
+    )
     common.add_argument("--no-cache", action="store_true", help="Disable persistent cache reads/writes")
     common.add_argument("--refresh-cache", action="store_true", help="Ignore cache and refresh entries")
 

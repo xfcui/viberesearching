@@ -32,7 +32,7 @@ Single user-facing doc: `README.md`. No other project `.md` docs.
 5. First run — one concrete happy-path example (prefer deep or batch baseline)
 6. Usage Examples — progressive (async deep → batch retry → enrich → verify)
 7. CLI Reference — one subsection per public runner below
-8. Input/Output — `output/` tree, `work/research/` tree, ideas JSON, cost table
+8. Input/Output — `work/deep/`, `work/batch/`, `work/enrich/` trees, ideas JSON, cost table
 9. Configuration — `.env` table, priority, categories, sample INI (placeholders only)
 10. License + sign-off
 
@@ -47,7 +47,7 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 | `verify-references` | `.cursor/skills/verify-references/scripts/verify_references.py` |
 
 - Include every command + flag (defaults, required, choices)
-- `enrich-research` is an agent skill (no dedicated runner) — cover in Pick a path / Features; CLI examples reuse `batch-research` with `work/research/`
+- `enrich-research` is an agent skill (no dedicated runner) — cover in Pick a path / Features; CLI examples reuse `batch-research` with `work/enrich/` and `--max-queries 0`
 - Skill workflow detail lives in `.cursor/skills/*/SKILL.md` — README stays command-oriented
 - Never document `ship-it` or removed skills (e.g. convert-pdf)
 
@@ -55,15 +55,16 @@ Document argparse exactly — run `--help` or read `add_argument` in:
 
 | Artifact | Path |
 |----------|------|
-| Deep/batch reports | `output/research_init.md`, `output/research_deep.md`, `output/researchNN_*.md` |
-| Deep ideation | `output/deep_research_idea.md` |
-| Batch queries | `output/ideas.json` |
-| Batch / async state | `output/manifest.json`, `output/active_tasks.json`, `output/active_batches.json` |
-| OpenAlex cache | `output/openalex_cache.json` |
+| Deep reports | `work/deep/research_init.md`, `work/deep/research_deep.md` |
+| Deep ideation | `work/deep/deep_research_idea.md` |
+| Batch reports | `work/batch/research_init.md`, `work/batch/researchNN_*.md` |
+| Batch queries / outcomes | `work/batch/ideas.json`, `work/batch/manifest.json` |
+| Temp state (all skills) | `{work dir}/tmp_state.json`, `tmp_checkpoint.json`, `tmp_checkpoint_response.json` — auto-removed on success |
+| OpenAlex cache | `{report dir}/openalex_cache.json` (per directory; `--cache PATH` to share one) |
 | Verify sidecars | `{report}.json` beside `{report}.md` (audit-only; never rewrite reports) |
-| Enrich I/O | inputs `work/idea.md`, `work/outline_*.md` → `work/research/` (`brief.md`, `ideas.json`, `batch_state.json`, reports) |
+| Enrich I/O | inputs are user-supplied (any path/filename, `@` mention, or pasted text) → `work/enrich/` (`brief.md`, `ideas.json`, reports) |
 
-Examples must use these paths (`output/...`, `work/research/...`) — never invent alternate names.
+Output examples must use these paths (`work/deep/...`, `work/batch/...`, `work/enrich/...`) — never invent alternate names. Do **not** prescribe input filenames for enrich; sources are whatever the user provides.
 
 ## Configuration rules
 

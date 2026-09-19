@@ -1,116 +1,42 @@
 #!/usr/bin/env python3
-import os
 import sys
 import json
 import time
 import argparse
-import configparser
 from pathlib import Path
 from typing import Any, Optional
-from dotenv import load_dotenv
-from valyu import Valyu
 
-MODE_COSTS = {"fast": 0.10, "standard": 0.50, "heavy": 2.50, "max": 15.00}
-STATE_FILE = "output/active_tasks.json"
-CHECKPOINT_FILE = "output/checkpoint.json"
-CHECKPOINT_RESPONSE_FILE = "output/checkpoint_response.json"
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared"))
+from research_env import (  # noqa: E402
+    check_cost_limit,
+    get_search_config,
+    get_valyu_client,
+    resolve_work_dir as _resolve_work_dir,
+)
+from research_scope import (  # noqa: E402
+    TMP_CHECKPOINT_NAME,
+    TMP_CHECKPOINT_RESPONSE_NAME,
+    anchor_query,
+    append_state,
+    gate_scope,
+    purge_tmp,
+)
 
-
-def find_env_file() -> Path:
-    current = Path(__file__).resolve().parent
-    for parent in [current] + list(current.parents):
-        env_file = parent / ".env"
-        if env_file.exists():
-            return env_file
-    return Path.cwd() / ".env"
-
-
-def read_valyu_section(env_path: Path) -> dict[str, str]:
-    if not env_path.exists():
-        return {}
-    try:
-        text = env_path.read_text(encoding="utf-8")
-        start = text.find("[valyu]")
-        if start == -1:
-            return {}
-        parser = configparser.ConfigParser()
-        parser.read_string(text[start:])
-        if not parser.has_section("valyu"):
-            return {}
-        return {key: value for key, value in parser.items("valyu") if key != "DEFAULT"}
-    except Exception:
-        return {}
+DEFAULT_WORK_DIR = Path("work/deep")
 
 
-def get_valyu_client() -> Valyu:
-    env_path = find_env_file()
-    load_dotenv(env_path)
-    section = read_valyu_section(env_path)
-    api_key = os.getenv("VALYU_API_KEY") or section.get("api_key", "").strip()
-    if not api_key:
-        print("Error: VALYU_API_KEY not found in environment or [valyu] section of .env.", file=sys.stderr)
-        sys.exit(1)
-    return Valyu(api_key=api_key)
+def resolve_work_dir(output: Optional[str]) -> Path:
+    return _resolve_work_dir(output, DEFAULT_WORK_DIR)
 
 
-def get_search_config() -> Optional[dict[str, Any]]:
-    env_path = find_env_file()
-    load_dotenv(env_path)
-    section = read_valyu_section(env_path)
-    categories = os.getenv("VALYU_CATEGORIES") or section.get("categories")
-    if categories:
-        categories = categories.strip()
-        parts = [part.strip() for part in categories.split(",") if part.strip()]
-        if parts:
-            return {"category": parts[0]}
-    return None
-
-
-def check_cost_limit(mode: str, max_cost: Optional[float], task_count: int = 1):
-    """Abort if estimated cost exceeds --max-cost safety limit."""
-    if max_cost is None:
-        return
-    estimated = MODE_COSTS.get(mode, 0.50) * task_count
-    if estimated > max_cost:
-        print(
-            f"Error: Estimated cost ${estimated:.2f} ({task_count} task(s) x ${MODE_COSTS.get(mode, 0.50):.2f}/{mode}) "
-            f"exceeds --max-cost limit of ${max_cost:.2f}. Aborting.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    print(f"Cost check passed: estimated ${estimated:.2f} <= limit ${max_cost:.2f}")
-
-
-def save_active_task(task_id: str, query: str, mode: str, output: str):
-    """Persist task metadata so `status` can retrieve it later."""
-    state_path = Path(STATE_FILE)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-
-    tasks = []
-    if state_path.exists():
-        try:
-            tasks = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            tasks = []
-
-    tasks.append({
-        "task_id": task_id,
-        "query": query,
-        "mode": mode,
-        "output": output,
-        "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    })
-    state_path.write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def make_hitl_handler():
+def make_hitl_handler(work_dir: Path):
     """
     Returns an on_interaction callback that writes checkpoint data to a file,
     waits for a human response file, then returns it to the SDK.
     """
     def handle_interaction(interaction):
-        checkpoint_path = Path(CHECKPOINT_FILE)
-        response_path = Path(CHECKPOINT_RESPONSE_FILE)
+        checkpoint_path = work_dir / TMP_CHECKPOINT_NAME
+        response_path = work_dir / TMP_CHECKPOINT_RESPONSE_NAME
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
 
         checkpoint_data = {
@@ -124,8 +50,8 @@ def make_hitl_handler():
             response_path.unlink()
 
         print(f"\n[CHECKPOINT] Task paused: {checkpoint_data['type']}")
-        print(f"  Details written to {CHECKPOINT_FILE}")
-        print(f"  Write your response to {CHECKPOINT_RESPONSE_FILE} to resume.")
+        print(f"  Details written to {checkpoint_path}")
+        print(f"  Write your response to {response_path} to resume.")
         print("  Waiting for response...")
 
         while not response_path.exists():
@@ -149,10 +75,18 @@ def handle_research(args):
     client = get_valyu_client()
     query = args.query
     output_path = Path(args.output)
+    work_dir = resolve_work_dir(args.output)
     mode = args.mode
     no_wait = getattr(args, "no_wait", False)
     max_cost = getattr(args, "max_cost", None)
     hitl_enabled = getattr(args, "hitl", False)
+    main_topic = getattr(args, "main_topic", None)
+
+    if main_topic:
+        gate_scope([{"query": query}], {"main_topic": main_topic},
+                   allow_drift=getattr(args, "allow_drift", False))
+        if not getattr(args, "no_anchor", False):
+            query = anchor_query(query, main_topic)
 
     check_cost_limit(mode, max_cost)
 
@@ -194,8 +128,16 @@ def handle_research(args):
     print(f"Task created successfully. Task ID: {deepresearch_id}")
 
     if no_wait:
-        save_active_task(deepresearch_id, query, mode, str(output_path))
-        print(f"Task submitted in --no-wait mode. State saved to {STATE_FILE}.")
+        state_path = append_state(work_dir, {
+            "kind": "task",
+            "task_id": deepresearch_id,
+            "query": query,
+            "main_topic": main_topic,
+            "mode": mode,
+            "output": str(output_path),
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
+        print(f"Task submitted in --no-wait mode. State saved to {state_path}.")
         print("Use the 'status' command to check progress and download results later.")
         return
 
@@ -206,7 +148,7 @@ def handle_research(args):
         "on_progress": lambda s: print(f"  Status: {getattr(s, 'status', 'running')}"),
     }
     if hitl_enabled:
-        wait_kwargs["on_interaction"] = make_hitl_handler()
+        wait_kwargs["on_interaction"] = make_hitl_handler(work_dir)
 
     result = client.deepresearch.wait(deepresearch_id, **wait_kwargs)
 
@@ -224,6 +166,7 @@ def handle_research(args):
     output_text = getattr(result, "output", "") or "No output generated."
     output_path.write_text(output_text, encoding="utf-8")
     print(f"Report saved to {output_path}")
+    purge_tmp(work_dir, "task_id", deepresearch_id)
 
 
 def handle_status(args):
@@ -231,6 +174,7 @@ def handle_status(args):
     client = get_valyu_client()
     task_id = args.task_id
     output_path = Path(args.output) if args.output else None
+    work_dir = resolve_work_dir(args.output)
 
     print(f"Checking status of task: {task_id}")
     status_resp = client.deepresearch.status(task_id)
@@ -246,7 +190,7 @@ def handle_status(args):
         interaction = getattr(status_resp, "interaction", None)
         print("  Task is awaiting human input (HITL checkpoint).")
         if interaction:
-            checkpoint_path = Path(CHECKPOINT_FILE)
+            checkpoint_path = work_dir / TMP_CHECKPOINT_NAME
             checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
             checkpoint_data = {
                 "interaction_id": getattr(interaction, "interaction_id", None),
@@ -254,7 +198,7 @@ def handle_status(args):
                 "data": getattr(interaction, "data", {}),
             }
             checkpoint_path.write_text(json.dumps(checkpoint_data, indent=2, ensure_ascii=False), encoding="utf-8")
-            print(f"  Checkpoint details saved to {CHECKPOINT_FILE}")
+            print(f"  Checkpoint details saved to {checkpoint_path}")
         return
 
     if task_status == "failed":
@@ -272,7 +216,8 @@ def handle_status(args):
             output_path.write_text(output_text, encoding="utf-8")
             print(f"  Report saved to {output_path}")
 
-            _remove_from_active(task_id)
+            purge_tmp(work_dir, "task_id", task_id)
+            print("  Temp state cleaned up.")
         else:
             print("  Provide --output to download and save the report.")
     else:
@@ -295,9 +240,10 @@ def handle_respond(args):
         print(f"Error: Failed to parse response file: {e}", file=sys.stderr)
         sys.exit(1)
 
+    checkpoint_path = resolve_work_dir(str(response_file)) / TMP_CHECKPOINT_NAME
+
     interaction_id = response_data.pop("interaction_id", None)
     if not interaction_id:
-        checkpoint_path = Path(CHECKPOINT_FILE)
         if checkpoint_path.exists():
             checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
             interaction_id = checkpoint.get("interaction_id")
@@ -313,19 +259,7 @@ def handle_respond(args):
         response=response_data,
     )
     print(f"  Response accepted. Task status: {getattr(result, 'status', 'resumed')}")
-    Path(CHECKPOINT_FILE).unlink(missing_ok=True)
-
-
-def _remove_from_active(task_id: str):
-    state_path = Path(STATE_FILE)
-    if not state_path.exists():
-        return
-    try:
-        tasks = json.loads(state_path.read_text(encoding="utf-8"))
-        tasks = [t for t in tasks if t.get("task_id") != task_id]
-        state_path.write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
+    checkpoint_path.unlink(missing_ok=True)
 
 
 def main():
@@ -338,6 +272,10 @@ def main():
     parser_run = subparsers.add_parser("run", help="Create a new deep research task")
     parser_run.add_argument("--query", required=True, help="The research query")
     parser_run.add_argument("--output", required=True, help="Path to save the markdown report")
+    parser_run.add_argument(
+        "--main-topic", default=None,
+        help="Parent topic to anchor the query to (omit for the baseline run)",
+    )
     parser_run.add_argument(
         "--mode", default="fast", choices=["fast", "standard", "heavy", "max"],
         help="DeepResearch mode (default: fast)",
@@ -353,6 +291,14 @@ def main():
     parser_run.add_argument(
         "--hitl", action="store_true",
         help="Enable human-in-the-loop checkpoints (plan_review, source_review)",
+    )
+    parser_run.add_argument(
+        "--no-anchor", action="store_true",
+        help="Do not attach the main topic to the submitted query",
+    )
+    parser_run.add_argument(
+        "--allow-drift", action="store_true",
+        help="Downgrade scope-check errors to warnings",
     )
 
     # --- status: check task progress and optionally download ---

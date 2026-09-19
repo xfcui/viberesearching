@@ -8,15 +8,13 @@ alwaysApply: false
 
 This rule enforces best practices for integrating and working with the Valyu API—security, cost safety, query craft, source scoping, robust execution, and Human-in-the-Loop (HITL) handling.
 
-For the full Search / Contents / Answer / DeepResearch cookbook, see `.agents/skills/valyu-best-practices/` (especially `references/prompting.md` and `references/deepresearch-recipes/`).
-
 ## 0. Choosing the Right API
 
 | Need | Use | How in this workspace |
 |---|---|---|
-| Find sources across web/academic/news | Search API | `valyu-best-practices` + official `valyu` SDK |
-| Extract clean text from known URLs | Contents API | `valyu-best-practices` |
-| Quick cited answer / fact check | Answer API | `valyu-best-practices` (prefer over DeepResearch for lookups) |
+| Find sources across web/academic/news | Search API | Official `valyu` SDK — no runner in this repo |
+| Extract clean text from known URLs | Contents API | Official `valyu` SDK — no runner in this repo |
+| Quick cited answer / fact check | Answer API | Official `valyu` SDK — prefer over DeepResearch for lookups |
 | Comprehensive markdown research report | DeepResearch API | Project runners: `deep-research`, `batch-research`, `enrich-research` |
 
 Do **not** spend DeepResearch budget on questions Answer or Search can resolve.
@@ -144,17 +142,56 @@ def check_cost_limit(mode: str, max_cost: float, task_count: int = 1):
 
 For tasks that take 10+ minutes (`heavy` or `max` modes, or batches with 5+ queries), use **asynchronous execution** (`--no-wait`) to prevent blocking the agent or client thread.
 
-- Save task/batch metadata to state files (e.g., `output/active_tasks.json` or `output/active_batches.json`).
+- Save task/batch metadata to the work directory's `tmp_state.json`.
 - Provide a `status` command or polling mechanism to check progress and download results later.
 
 ## 8. Human-in-the-Loop (HITL) Checkpoints
 
 For high-stakes research, enable HITL checkpoints (`plan_review`, `source_review`) via the **deep-research** runner (`--hitl`). Batch path has no HITL—use deep-research for gated single dives.
 
-- Write checkpoint data to `output/checkpoint.json`.
-- Wait for a user response in `output/checkpoint_response.json`.
+- Write checkpoint data to `work/deep/tmp_checkpoint.json`.
+- Wait for a user response in `work/deep/tmp_checkpoint_response.json`.
 - Return the response to the SDK's `on_interaction` callback.
 
 ## 9. Batch & Retry Workflows
 
 For multi-query research, run tasks in parallel using the batch API. Maintain a `manifest.json` to track task statuses (`completed`, `failed`, `cancelled`), and implement a retry mechanism to re-run only failed tasks.
+
+## 10. Scope Anchoring & Drift Control
+
+Follow-up queries reach Valyu as standalone strings. Without an anchor, a sub-query is researched as whatever topic it reads like on its own, so a batch drifts away from the baseline one query at a time. Every follow-up must therefore carry its parent topic.
+
+### Scope contract
+
+The ideation artifact declares the scope once, and every query points back into it:
+
+```json
+{
+  "main_topic": "Representation learning of small molecules",
+  "anchor_terms": ["molecular representation", "small molecule"],
+  "anchor_headings": ["1. Fundamentals", "2. Neural Architectures"],
+  "queries": [
+    {"id": "Q01", "anchor": "2. Neural Architectures", "query": "..."}
+  ]
+}
+```
+
+`anchor_headings` are the baseline report's H2s for deep/batch, or headings taken from the user's source content for enrich. Runners attach the parent topic to each submitted query automatically (`--no-anchor` opts out) and persist `main_topic` / `anchor` into `manifest.json` so retries and audits stay anchored.
+
+### Ineligible anchors
+
+A heading that summarises or open-endedly extends the report cannot constrain anything — anchoring to one licenses unlimited breadth. These are rejected:
+
+`Executive Summary` · `Conclusion` · `Sources` / `References` · anything matching `Applications` · `Future Directions` · `Recent Developments` · `Emerging`
+
+### Three-test gate
+
+Apply to every follow-up query before submitting:
+
+1. **Anchor test** — it resolves to a substantive anchor heading, not a catch-all.
+2. **Subject test** — the query's subject is still the main topic's subject. Under a scan-RNN baseline, "vision Mamba 2D spatial scanning" fails: the subject became vision models.
+3. **Transfer test** — if the query would read naturally in a report on a *different* main topic, it is drift.
+
+Sharing only generic vocabulary (`neural`, `network`, `model`, `learning`, `system`) is not a pass. The runners enforce this locally before any API spend and abort on failure; `--allow-drift` downgrades errors to warnings when a query is genuinely in scope but worded unusually.
+
+After reports land, `scope-check` audits their headings against the manifest's anchors — free, no API calls.

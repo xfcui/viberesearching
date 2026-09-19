@@ -1,129 +1,62 @@
 #!/usr/bin/env python3
-import os
 import sys
 import json
 import time
 import argparse
-import configparser
 from pathlib import Path
-from typing import Any, Optional, Set, Union
-from dotenv import load_dotenv
-from valyu import Valyu
+from typing import Any, Optional
 
-MODE_COSTS = {"fast": 0.10, "standard": 0.50, "heavy": 2.50, "max": 15.00}
-DEFAULT_STATE_FILE = Path("output/active_batches.json")
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "_shared"))
+from research_env import (  # noqa: E402
+    check_cost_limit,
+    get_search_config,
+    get_valyu_client,
+    resolve_work_dir as _resolve_work_dir,
+)
+from research_scope import (  # noqa: E402
+    anchor_query,
+    audit_report_scope,
+    append_state,
+    gate_scope,
+    load_scoped_queries,
+    purge_tmp,
+    tmp_state_path,
+)
 
-
-def active_batches_path(output_dir: Optional[Union[str, Path]] = None) -> Path:
-    """Prefer {output_dir}/active_batches.json; fall back to output/active_batches.json."""
-    if output_dir:
-        return Path(output_dir) / "active_batches.json"
-    return DEFAULT_STATE_FILE
-
-
-def find_env_file() -> Path:
-    current = Path(__file__).resolve().parent
-    for parent in [current] + list(current.parents):
-        env_file = parent / ".env"
-        if env_file.exists():
-            return env_file
-    return Path.cwd() / ".env"
-
-
-def read_valyu_section(env_path: Path) -> dict[str, str]:
-    if not env_path.exists():
-        return {}
-    try:
-        text = env_path.read_text(encoding="utf-8")
-        start = text.find("[valyu]")
-        if start == -1:
-            return {}
-        parser = configparser.ConfigParser()
-        parser.read_string(text[start:])
-        if not parser.has_section("valyu"):
-            return {}
-        return {key: value for key, value in parser.items("valyu") if key != "DEFAULT"}
-    except Exception:
-        return {}
+DEFAULT_WORK_DIR = Path("work/batch")
+DEFAULT_MAX_QUERIES = 12
 
 
-def get_valyu_client() -> Valyu:
-    env_path = find_env_file()
-    load_dotenv(env_path)
-    section = read_valyu_section(env_path)
-    api_key = os.getenv("VALYU_API_KEY") or section.get("api_key", "").strip()
-    if not api_key:
-        print("Error: VALYU_API_KEY not found in environment or [valyu] section of .env.", file=sys.stderr)
-        sys.exit(1)
-    return Valyu(api_key=api_key)
+def resolve_work_dir(output: Optional[str]) -> Path:
+    return _resolve_work_dir(output, DEFAULT_WORK_DIR)
 
 
-def get_search_config() -> Optional[dict[str, Any]]:
-    env_path = find_env_file()
-    load_dotenv(env_path)
-    section = read_valyu_section(env_path)
-    categories = os.getenv("VALYU_CATEGORIES") or section.get("categories")
-    if categories:
-        categories = categories.strip()
-        parts = [part.strip() for part in categories.split(",") if part.strip()]
-        if parts:
-            return {"category": parts[0]}
-    return None
-
-
-def check_cost_limit(mode: str, max_cost: Optional[float], task_count: int = 1):
-    """Abort if estimated cost exceeds --max-cost safety limit."""
-    if max_cost is None:
+def check_query_limit(query_count: int, max_queries: Optional[int]):
+    """Abort if the ideas file exceeds the skill's fan-out cap (0 = unlimited)."""
+    if not max_queries:
         return
-    estimated = MODE_COSTS.get(mode, 0.50) * task_count
-    if estimated > max_cost:
+    if query_count > max_queries:
         print(
-            f"Error: Estimated cost ${estimated:.2f} ({task_count} task(s) x ${MODE_COSTS.get(mode, 0.50):.2f}/{mode}) "
-            f"exceeds --max-cost limit of ${max_cost:.2f}. Aborting.",
+            f"Error: {query_count} queries exceeds the --max-queries cap of {max_queries}. "
+            "Trim the ideas file, or pass --max-queries 0 for an uncapped run. Aborting.",
             file=sys.stderr,
         )
         sys.exit(1)
-    print(f"Cost check passed: estimated ${estimated:.2f} <= limit ${max_cost:.2f}")
 
 
-def load_queries(queries_file: Path) -> list[dict[str, str]]:
-    """Parse a JSON queries file into a list of query dicts."""
-    if not queries_file.exists():
-        print(f"Error: Queries file '{queries_file}' does not exist.", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        data = json.loads(queries_file.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and "queries" in data:
-            queries_raw = data["queries"]
-        else:
-            queries_raw = data
-
-        if not isinstance(queries_raw, list):
-            raise ValueError("Root or 'queries' must be a list")
-
-        queries = []
-        for item in queries_raw:
-            if isinstance(item, str):
-                queries.append({"query": item})
-            elif isinstance(item, dict) and "query" in item:
-                queries.append({"query": item["query"]})
-            else:
-                print(f"Warning: Skipping invalid item: {item}", file=sys.stderr)
-        return queries
-    except Exception as e:
-        print(f"Error: Failed to parse queries file as JSON: {e}", file=sys.stderr)
-        sys.exit(1)
-
-
-def save_batch_results(client, batch_id: str, output_dir: Path) -> list[dict]:
-    """Download all batch task results and return the manifest entries."""
+def save_batch_results(client, batch_id: str, output_dir: Path, scope: Optional[dict] = None) -> tuple[list[dict], bool]:
+    """Download batch results; return (manifest, all_succeeded)."""
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Fetching results and saving to {output_dir}...")
+
+    scope = scope or {}
+    main_topic = scope.get("main_topic", "")
+    by_query = {entry.get("submitted", ""): entry for entry in scope.get("entries", [])}
 
     manifest = []
     last_key = None
     task_count = 0
+    all_succeeded = True
 
     while True:
         results = client.batch.list_tasks(
@@ -143,6 +76,9 @@ def save_batch_results(client, batch_id: str, output_dir: Path) -> list[dict]:
             filepath.write_text(output_text, encoding="utf-8")
             print(f"  Saved: {filename}")
 
+            if task.status != "completed":
+                all_succeeded = False
+
             sources_list = []
             if task.sources:
                 for src in task.sources:
@@ -151,9 +87,13 @@ def save_batch_results(client, batch_id: str, output_dir: Path) -> list[dict]:
                         "url": getattr(src, "url", ""),
                     })
 
+            origin = by_query.get(task.query, {})
             manifest.append({
                 "task_id": task.task_id,
+                "id": origin.get("id"),
                 "query": task.query,
+                "main_topic": origin.get("main_topic", main_topic),
+                "anchor": origin.get("anchor"),
                 "status": task.status,
                 "cost": task.cost,
                 "filename": filename,
@@ -168,51 +108,16 @@ def save_batch_results(client, batch_id: str, output_dir: Path) -> list[dict]:
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"  Saved manifest to {manifest_path}")
-    return manifest
+    return manifest, all_succeeded
 
 
-def save_active_batch(batch_id: str, name: str, mode: str, output_dir: str, query_count: int):
-    """Persist batch metadata so `status` can retrieve it later."""
-    state_path = active_batches_path(output_dir)
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-
-    batches = []
-    if state_path.exists():
-        try:
-            batches = json.loads(state_path.read_text(encoding="utf-8"))
-        except Exception:
-            batches = []
-
-    batches.append({
-        "batch_id": batch_id,
-        "name": name,
-        "mode": mode,
-        "output_dir": output_dir,
-        "query_count": query_count,
-        "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    })
-    state_path.write_text(json.dumps(batches, indent=2, ensure_ascii=False), encoding="utf-8")
-    return state_path
-
-
-def _remove_from_active(batch_id: str, output_dir: Optional[Union[str, Path]] = None):
-    # Check both the run's output dir and the legacy default path.
-    candidates = []
-    if output_dir:
-        candidates.append(active_batches_path(output_dir))
-    candidates.append(DEFAULT_STATE_FILE)
-    seen: Set[Path] = set()
-    for state_path in candidates:
-        state_path = Path(state_path)
-        if state_path in seen or not state_path.exists():
-            continue
-        seen.add(state_path)
-        try:
-            batches = json.loads(state_path.read_text(encoding="utf-8"))
-            batches = [b for b in batches if b.get("batch_id") != batch_id]
-            state_path.write_text(json.dumps(batches, indent=2, ensure_ascii=False), encoding="utf-8")
-        except Exception:
-            pass
+def finish_batch(output_dir: Path, batch_id: str, all_succeeded: bool):
+    """Clean up temp state after a clean run; keep it when retry is still needed."""
+    if all_succeeded:
+        purge_tmp(output_dir, "batch_id", batch_id)
+        print("  Temp state cleaned up.")
+    else:
+        print("  Some tasks did not complete — temp state kept for 'retry'.")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -222,11 +127,19 @@ def _remove_from_active(batch_id: str, output_dir: Optional[Union[str, Path]] = 
 
 def handle_single(args):
     client = get_valyu_client()
-    query = args.query
     output_path = Path(args.output)
+    work_dir = resolve_work_dir(args.output)
     mode = args.mode
     no_wait = getattr(args, "no_wait", False)
     max_cost = getattr(args, "max_cost", None)
+    main_topic = getattr(args, "main_topic", None)
+
+    query = args.query
+    if main_topic:
+        gate_scope([{"query": query}], {"main_topic": main_topic},
+                   allow_drift=getattr(args, "allow_drift", False))
+        if not getattr(args, "no_anchor", False):
+            query = anchor_query(query, main_topic)
 
     check_cost_limit(mode, max_cost)
 
@@ -253,22 +166,15 @@ def handle_single(args):
     print(f"Task created successfully. Task ID: {task.deepresearch_id}")
 
     if no_wait:
-        state_path = Path("output/active_tasks.json")
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        tasks = []
-        if state_path.exists():
-            try:
-                tasks = json.loads(state_path.read_text(encoding="utf-8"))
-            except Exception:
-                tasks = []
-        tasks.append({
+        state_path = append_state(work_dir, {
+            "kind": "task",
             "task_id": task.deepresearch_id,
             "query": query,
+            "main_topic": main_topic,
             "mode": mode,
             "output": str(output_path),
             "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         })
-        state_path.write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
         print(f"Task submitted in --no-wait mode. State saved to {state_path}.")
         print("Use the 'status' command to check progress later.")
         return
@@ -292,6 +198,7 @@ def handle_single(args):
     output_text = result.output or "No output generated."
     output_path.write_text(output_text, encoding="utf-8")
     print(f"Report saved to {output_path}")
+    purge_tmp(work_dir, "task_id", task.deepresearch_id)
 
 
 def handle_batch(args):
@@ -303,12 +210,29 @@ def handle_batch(args):
     no_wait = getattr(args, "no_wait", False)
     max_cost = getattr(args, "max_cost", None)
 
-    queries = load_queries(queries_file)
-    if not queries:
+    meta, entries = load_scoped_queries(queries_file)
+    if not entries:
         print("Error: No valid queries found to research.", file=sys.stderr)
         sys.exit(1)
 
-    check_cost_limit(mode, max_cost, task_count=len(queries))
+    check_query_limit(len(entries), args.max_queries)
+    gate_scope(entries, meta, allow_drift=getattr(args, "allow_drift", False))
+    check_cost_limit(mode, max_cost, task_count=len(entries))
+
+    main_topic = meta.get("main_topic", "")
+    anchoring = bool(main_topic) and not getattr(args, "no_anchor", False)
+    scope_entries = []
+    queries = []
+    for entry in entries:
+        submitted = anchor_query(entry["query"], main_topic) if anchoring else entry["query"]
+        queries.append({"query": submitted})
+        scope_entries.append({
+            "submitted": submitted,
+            "id": entry.get("id"),
+            "anchor": entry.get("anchor"),
+            "main_topic": main_topic,
+        })
+    scope = {"main_topic": main_topic, "entries": scope_entries}
 
     print(f"Creating a new batch '{name}' in '{mode}' mode with {len(queries)} queries...")
     kwargs: dict[str, Any] = {
@@ -331,7 +255,16 @@ def handle_batch(args):
     print("Tasks added successfully!")
 
     if no_wait:
-        state_path = save_active_batch(batch_id, name, mode, str(output_dir), len(queries))
+        state_path = append_state(output_dir, {
+            "kind": "batch",
+            "batch_id": batch_id,
+            "name": name,
+            "mode": mode,
+            "output_dir": str(output_dir),
+            "query_count": len(queries),
+            "scope": scope,
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
         print(f"Batch submitted in --no-wait mode. State saved to {state_path}.")
         print("Use the 'status' command to check progress later.")
         return
@@ -354,7 +287,8 @@ def handle_batch(args):
     print(f"\nBatch finished with status: {final.batch.status}")
     print(f"Total cost: ${final.batch.cost:.2f}")
 
-    save_batch_results(client, batch_id, output_dir)
+    _, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
+    finish_batch(output_dir, batch_id, all_succeeded)
     print("Batch research completed successfully!")
 
 
@@ -383,12 +317,27 @@ def handle_status(args):
     if batch_status in ("completed", "completed_with_errors"):
         print(f"  Batch completed! Total cost: ${batch_info.cost:.2f}")
         if output_dir:
-            save_batch_results(client, batch_id, output_dir)
-            _remove_from_active(batch_id, output_dir)
+            scope = load_batch_scope(output_dir, batch_id)
+            _, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
+            finish_batch(output_dir, batch_id, all_succeeded)
         else:
             print("  Provide --output-dir to download and save results.")
     else:
         print(f"  Batch ended with status: {batch_status}")
+
+
+def load_batch_scope(output_dir: Path, batch_id: str) -> dict:
+    """Recover the anchor map a --no-wait batch stored at submit time."""
+    state_path = tmp_state_path(output_dir)
+    if not state_path.exists():
+        return {}
+    try:
+        for entry in json.loads(state_path.read_text(encoding="utf-8")):
+            if entry.get("batch_id") == batch_id:
+                return entry.get("scope", {})
+    except Exception:
+        pass
+    return {}
 
 
 def handle_retry(args):
@@ -410,18 +359,30 @@ def handle_retry(args):
         print(f"Error: Failed to parse manifest: {e}", file=sys.stderr)
         sys.exit(1)
 
-    failed_queries = [
-        {"query": entry["query"]}
-        for entry in manifest
-        if entry.get("status") in ("failed", "cancelled")
-    ]
+    failed = [entry for entry in manifest if entry.get("status") in ("failed", "cancelled")]
 
-    if not failed_queries:
+    if not failed:
         print("No failed or cancelled tasks found in manifest. Nothing to retry.")
         return
 
-    print(f"Found {len(failed_queries)} failed/cancelled task(s) to retry.")
-    check_cost_limit(mode, max_cost, task_count=len(failed_queries))
+    print(f"Found {len(failed)} failed/cancelled task(s) to retry.")
+    check_cost_limit(mode, max_cost, task_count=len(failed))
+
+    # anchor_query is idempotent, so replaying an already-anchored query is safe.
+    anchoring = not getattr(args, "no_anchor", False)
+    scope_entries = []
+    failed_queries = []
+    for entry in failed:
+        topic = entry.get("main_topic") or ""
+        submitted = anchor_query(entry["query"], topic) if anchoring else entry["query"]
+        failed_queries.append({"query": submitted})
+        scope_entries.append({
+            "submitted": submitted,
+            "id": entry.get("id"),
+            "anchor": entry.get("anchor"),
+            "main_topic": topic,
+        })
+    scope = {"main_topic": scope_entries[0]["main_topic"] if scope_entries else "", "entries": scope_entries}
 
     name = f"Retry: {len(failed_queries)} failed tasks"
     kwargs: dict[str, Any] = {
@@ -442,7 +403,16 @@ def handle_retry(args):
     print("Failed tasks re-submitted!")
 
     if no_wait:
-        state_path = save_active_batch(batch_id, name, mode, str(output_dir), len(failed_queries))
+        state_path = append_state(output_dir, {
+            "kind": "batch",
+            "batch_id": batch_id,
+            "name": name,
+            "mode": mode,
+            "output_dir": str(output_dir),
+            "query_count": len(failed_queries),
+            "scope": scope,
+            "submitted_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        })
         print(f"Retry batch submitted in --no-wait mode. State saved to {state_path}.")
         return
 
@@ -459,20 +429,77 @@ def handle_retry(args):
     print(f"\nRetry batch finished with status: {final.batch.status}")
     print(f"Total cost: ${final.batch.cost:.2f}")
 
-    retry_manifest = save_batch_results(client, batch_id, output_dir)
+    retry_manifest, all_succeeded = save_batch_results(client, batch_id, output_dir, scope)
 
     # Merge retry results back into the original manifest
-    original_failed_queries = {e["query"] for e in manifest if e.get("status") in ("failed", "cancelled")}
-    merged = [e for e in manifest if e["query"] not in original_failed_queries]
+    retried = {e["query"] for e in failed}
+    merged = [e for e in manifest if e["query"] not in retried]
     merged.extend(retry_manifest)
     manifest_path.write_text(json.dumps(merged, indent=2, ensure_ascii=False), encoding="utf-8")
     print(f"Merged retry results back into {manifest_path}")
+
+    finish_batch(output_dir, batch_id, all_succeeded)
     print("Retry completed successfully!")
+
+
+def handle_scope_check(args):
+    """Audit finished reports for headings that wandered off the main topic."""
+    manifest_path = Path(args.manifest)
+    if not manifest_path.exists():
+        print(f"Error: Manifest file '{manifest_path}' does not exist.", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"Error: Failed to parse manifest: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    anchor_terms = []
+    if args.queries_file:
+        meta, _ = load_scoped_queries(Path(args.queries_file))
+        anchor_terms = meta.get("anchor_terms", [])
+
+    report_dir = Path(args.output_dir) if args.output_dir else manifest_path.parent
+    flagged = 0
+    checked = 0
+
+    for entry in manifest:
+        main_topic = entry.get("main_topic")
+        filename = entry.get("filename")
+        if not main_topic or not filename:
+            continue
+        report_path = report_dir / filename
+        if not report_path.exists():
+            continue
+
+        checked += 1
+        suspects = audit_report_scope(
+            report_path.read_text(encoding="utf-8"),
+            {"main_topic": main_topic, "anchor_terms": anchor_terms},
+        )
+        if suspects:
+            flagged += 1
+            print(f"  {filename}: {len(suspects)} off-topic heading(s)")
+            for heading in suspects:
+                print(f"    - {heading}")
+
+    if not checked:
+        print("No anchored reports found to check.")
+    elif flagged:
+        print(f"\nScope audit: {flagged}/{checked} report(s) contain headings unrelated to their main topic.")
+    else:
+        print(f"Scope audit: all {checked} report(s) stayed on topic.")
+
+
+def add_scope_flags(parser):
+    parser.add_argument("--no-anchor", action="store_true", help="Do not attach the main topic to submitted queries")
+    parser.add_argument("--allow-drift", action="store_true", help="Downgrade scope-check errors to warnings")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Valyu DeepResearch runner: single tasks, batch research, status polling, and retry."
+        description="Valyu DeepResearch runner: single tasks, batch research, status polling, retry, and scope audit."
     )
     subparsers = parser.add_subparsers(dest="command", required=True, help="Command to run")
 
@@ -480,12 +507,14 @@ def main():
     parser_single = subparsers.add_parser("single", help="Run a single deep research task")
     parser_single.add_argument("--query", required=True, help="The research query to run")
     parser_single.add_argument("--output", required=True, help="Path to save the markdown report")
+    parser_single.add_argument("--main-topic", default=None, help="Parent topic to anchor the query to")
     parser_single.add_argument(
         "--mode", default="fast", choices=["fast", "standard", "heavy", "max"],
         help="DeepResearch mode (default: fast)",
     )
     parser_single.add_argument("--no-wait", action="store_true", help="Submit and exit without polling")
     parser_single.add_argument("--max-cost", type=float, default=3.0, help="Max allowed cost in USD (default: 3.0)")
+    add_scope_flags(parser_single)
 
     # --- batch: run parallel batch research ---
     parser_batch = subparsers.add_parser("batch", help="Run a batch of deep research tasks")
@@ -493,11 +522,16 @@ def main():
     parser_batch.add_argument("--output-dir", required=True, help="Directory to save reports and manifest")
     parser_batch.add_argument("--name", default="Batch Research Task", help="Name of the batch")
     parser_batch.add_argument(
-        "--mode", default="fast", choices=["fast", "standard", "heavy", "max"],
-        help="DeepResearch mode (default: fast)",
+        "--mode", default="standard", choices=["fast", "standard", "heavy", "max"],
+        help="DeepResearch mode (default: standard)",
     )
     parser_batch.add_argument("--no-wait", action="store_true", help="Submit and exit without polling")
     parser_batch.add_argument("--max-cost", type=float, default=3.0, help="Max allowed cost in USD (default: 3.0)")
+    parser_batch.add_argument(
+        "--max-queries", type=int, default=DEFAULT_MAX_QUERIES,
+        help=f"Max queries allowed in the ideas file; 0 = unlimited (default: {DEFAULT_MAX_QUERIES})",
+    )
+    add_scope_flags(parser_batch)
 
     # --- status: check batch progress ---
     parser_status = subparsers.add_parser("status", help="Check status of a submitted batch")
@@ -514,6 +548,16 @@ def main():
     )
     parser_retry.add_argument("--no-wait", action="store_true", help="Submit retry and exit without polling")
     parser_retry.add_argument("--max-cost", type=float, default=3.0, help="Max allowed cost in USD (default: 3.0)")
+    add_scope_flags(parser_retry)
+
+    # --- scope-check: local audit of finished reports ---
+    parser_scope = subparsers.add_parser("scope-check", help="Audit finished reports for topic drift (no API calls)")
+    parser_scope.add_argument(
+        "--manifest", default=str(DEFAULT_WORK_DIR / "manifest.json"),
+        help=f"Manifest to audit (default: {DEFAULT_WORK_DIR / 'manifest.json'})",
+    )
+    parser_scope.add_argument("--output-dir", default=None, help="Directory holding the reports (default: manifest dir)")
+    parser_scope.add_argument("--queries-file", default=None, help="Ideas file to read anchor_terms from")
 
     args = parser.parse_args()
 
@@ -525,6 +569,8 @@ def main():
         handle_status(args)
     elif args.command == "retry":
         handle_retry(args)
+    elif args.command == "scope-check":
+        handle_scope_check(args)
 
 
 if __name__ == "__main__":
