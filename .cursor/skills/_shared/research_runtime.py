@@ -32,7 +32,9 @@ def _require_success(response: Any, action: str) -> None:
 
 
 def _terminal_status(response: Any) -> str:
-    return str(response_field(response, "status", "unknown") or "unknown")
+    raw = str(response_field(response, "status", "unknown") or "unknown")
+    # Normalize enum reprs like "DeepResearchStatus.COMPLETED" to "completed".
+    return raw.rsplit(".", 1)[-1].lower()
 
 
 def _save_output(response: Any, output_path: Path) -> None:

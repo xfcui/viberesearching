@@ -5,11 +5,9 @@
 
 # Local workspace artifacts (reports, state, project notes)
 project/
-research/
-output/
 # `work` (no slash) covers the symlink; `work/` covers a real directory
-work
 work/
+work
 
 # Python
 __pycache__/
